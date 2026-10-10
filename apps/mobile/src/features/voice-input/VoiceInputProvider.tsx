@@ -22,7 +22,10 @@ import {
 import { AppState, Platform } from "react-native";
 import { useSharedValue } from "react-native-reanimated";
 
-import { getLocalVoiceTranscriber } from "../../native/voiceTranscription";
+import { useAtomValue } from "@effect/atom-react";
+import { AsyncResult } from "effect/reactivity";
+import { mobilePreferencesAtom } from "../../state/preferences";
+import { getLocalVoiceTranscriber, getVoiceTranscriber } from "../../native/voiceTranscription";
 import { getNativeShowcaseScene } from "../showcase/nativeShowcaseScene";
 import {
   VOICE_RECORDING_LIMIT_SECONDS,
@@ -91,6 +94,10 @@ export function useGlobalVoiceInput() {
 }
 
 function useVoiceInputRuntime() {
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const preferences = AsyncResult.isSuccess(preferencesResult) ? preferencesResult.value : undefined;
+  const preferencesRef = useRef(preferences);
+  preferencesRef.current = preferences;
   const [{ state, ownerKey, label }, setState] = useState({
     state: INITIAL_STATE,
     ownerKey: null as string | null,
@@ -130,7 +137,7 @@ function useVoiceInputRuntime() {
     recorderRef.current = recorder;
     sessionRef.current = new VoiceInputSession({
       recorder,
-      getTranscriber: getLocalVoiceTranscriber,
+      getTranscriber: () => getVoiceTranscriber(preferencesRef.current),
       requestPermission: async () => {
         const permission = await requestRecordingPermissionsAsync();
         return { granted: permission.granted, canAskAgain: permission.canAskAgain };
@@ -229,7 +236,10 @@ function useVoiceInputRuntime() {
   return {
     // Store screenshots show the dictation button even on simulators, whose
     // on-device transcription is unavailable.
-    isAvailable: getLocalVoiceTranscriber() !== null || getNativeShowcaseScene() !== null,
+    isAvailable:
+      getVoiceTranscriber(preferences) !== null ||
+      getLocalVoiceTranscriber() !== null ||
+      getNativeShowcaseScene() !== null,
     state,
     audioLevels,
     elapsedSeconds,

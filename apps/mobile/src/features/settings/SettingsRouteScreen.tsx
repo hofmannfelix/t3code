@@ -1,3 +1,6 @@
+import { useAtomValue } from "@effect/atom-react";
+import { AsyncResult } from "effect/reactivity";
+import { mobilePreferencesAtom } from "../../state/preferences";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { useAuth, useUser } from "@clerk/expo";
 import { useNavigation } from "@react-navigation/native";
@@ -134,6 +137,19 @@ function LocalSettingsRouteScreen() {
 
 function SettingsIndexSections() {
   const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const voiceProvider = AsyncResult.isSuccess(preferencesResult)
+    ? preferencesResult.value.voiceTranscriptionProvider ?? "groq"
+    : "groq";
+  const voiceProviderLabel =
+    voiceProvider === "groq"
+      ? "Groq Whisper"
+      : voiceProvider === "openai"
+        ? "OpenAI Whisper"
+        : voiceProvider === "custom"
+          ? "Custom Endpoint"
+          : "Apple On-Device";
+
   const noServerTargets = selectedTargets.length === 0;
   const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
   const scopedProjectMembers =
@@ -153,6 +169,13 @@ function SettingsIndexSections() {
     <>
       <SettingsSection title="Interface">
         <SettingsRow icon="paintbrush" label="Appearance" target="SettingsAppearance" />
+        <SettingsRow
+          icon="mic"
+          label="Voice & Dictation"
+          value={voiceProviderLabel}
+          valuePosition="trailing"
+          target="SettingsVoiceInput"
+        />
         {Platform.OS === "ios" ? (
           <SettingsRow icon="keyboard" label="Keyboard" target="SettingsKeyboard" />
         ) : null}

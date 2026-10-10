@@ -1,3 +1,5 @@
+import { getWhisperVoiceTranscriber } from "../features/voice-input/whisperTranscription";
+import type { Preferences } from "../persistence/mobile-preferences";
 import AppleTranscription from "@react-native-ai/apple/src/NativeAppleTranscription";
 import { File } from "expo-file-system";
 
@@ -31,6 +33,30 @@ function getNativeErrorCode(error: unknown): string | undefined {
   }
 
   return typeof error.code === "string" ? error.code : undefined;
+}
+
+
+export function getVoiceTranscriber(preferences?: Preferences): VoiceTranscriber | null {
+  const provider = preferences?.voiceTranscriptionProvider;
+
+  if (provider === "apple") {
+    return getLocalVoiceTranscriber();
+  }
+  if (provider === "groq" || provider === "openai" || provider === "custom") {
+    return getWhisperVoiceTranscriber(preferences);
+  }
+
+  // If an API key or custom endpoint is configured, prioritize Whisper
+  if (preferences?.voiceTranscriptionApiKey?.trim() || preferences?.voiceTranscriptionCustomEndpoint?.trim()) {
+    return getWhisperVoiceTranscriber(preferences);
+  }
+
+  // Otherwise, fallback to on-device Apple Speech if available
+  const local = getLocalVoiceTranscriber();
+  if (local) return local;
+
+  // On devices where Apple Speech is not available, default to Groq Whisper
+  return getWhisperVoiceTranscriber(preferences);
 }
 
 export function getLocalVoiceTranscriber(): VoiceTranscriber | null {

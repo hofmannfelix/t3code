@@ -16,6 +16,14 @@ import { MobileStorageDecodeError, MobileStorageEncodeError } from "./mobile-sto
 const PREFERENCES_KEY = "t3code.preferences";
 const PREFERENCES_FALLBACK_KEY = "t3code.preferences.fallback";
 
+export const VOICE_TRANSCRIPTION_PROVIDERS = [
+  "apple",
+  "groq",
+  "openai",
+  "custom",
+] as const;
+export type VoiceTranscriptionProvider = (typeof VOICE_TRANSCRIPTION_PROVIDERS)[number];
+
 export interface Preferences {
   readonly liveActivitiesEnabled?: boolean;
   readonly themeId?: MobileThemeId;
@@ -52,6 +60,12 @@ export interface Preferences {
   readonly threadListSettledShelfExpanded?: boolean;
   readonly threadListSnoozedShelfExpanded?: boolean;
   readonly threadListWorkingShelfExpanded?: boolean;
+  readonly voiceTranscriptionProvider?: VoiceTranscriptionProvider;
+  readonly voiceTranscriptionApiKey?: string;
+  readonly voiceTranscriptionCustomEndpoint?: string;
+  readonly voiceTranscriptionCustomModel?: string;
+  readonly voiceTranscriptionLanguage?: string;
+
 }
 
 export class MobilePreferencesLoadError extends Schema.TaggedError<MobilePreferencesLoadError>()(
@@ -208,6 +222,25 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   if (typeof parsed.threadListWorkingShelfExpanded === "boolean") {
     preferences.threadListWorkingShelfExpanded = parsed.threadListWorkingShelfExpanded;
   }
+  if (
+    typeof parsed.voiceTranscriptionProvider === "string" &&
+    (VOICE_TRANSCRIPTION_PROVIDERS as readonly string[]).includes(parsed.voiceTranscriptionProvider)
+  ) {
+    preferences.voiceTranscriptionProvider = parsed.voiceTranscriptionProvider as VoiceTranscriptionProvider;
+  }
+  if (typeof parsed.voiceTranscriptionApiKey === "string") {
+    preferences.voiceTranscriptionApiKey = parsed.voiceTranscriptionApiKey;
+  }
+  if (typeof parsed.voiceTranscriptionCustomEndpoint === "string") {
+    preferences.voiceTranscriptionCustomEndpoint = parsed.voiceTranscriptionCustomEndpoint;
+  }
+  if (typeof parsed.voiceTranscriptionCustomModel === "string") {
+    preferences.voiceTranscriptionCustomModel = parsed.voiceTranscriptionCustomModel;
+  }
+  if (typeof parsed.voiceTranscriptionLanguage === "string") {
+    preferences.voiceTranscriptionLanguage = parsed.voiceTranscriptionLanguage;
+  }
+
   return preferences;
 }
 

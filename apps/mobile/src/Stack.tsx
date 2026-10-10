@@ -100,6 +100,7 @@ import {
   ScheduledTaskBranchPickerRouteScreen,
 } from "./features/settings/ScheduledTaskPickerScreens";
 import { ScheduledTaskEditorProvider } from "./features/settings/scheduled-task-editor";
+import { SettingsVoiceInputRouteScreen } from "./features/settings/SettingsVoiceInputRouteScreen";
 import { SettingsKeyboardRouteScreen } from "./features/settings/SettingsKeyboardRouteScreen";
 import { SettingsLegalRouteScreen } from "./features/settings/SettingsLegalRouteScreen";
 import {
@@ -302,6 +303,13 @@ const SettingsContentStack = createV5SheetStackNavigator({
       screen: SettingsProjectOverviewRouteScreen,
       linking: "project",
       options: { title: "Project overview" },
+    }),
+    SettingsVoiceInput: createNativeStackScreen({
+      screen: SettingsVoiceInputRouteScreen,
+      linking: "voice-input",
+      options: {
+        title: "Voice & Dictation",
+      },
     }),
     SettingsKeyboard: createNativeStackScreen({
       screen: SettingsKeyboardRouteScreen,
