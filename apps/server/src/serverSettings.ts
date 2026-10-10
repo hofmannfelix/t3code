@@ -163,6 +163,12 @@ const BITBUCKET_SECRET_NAMES = {
 } as const;
 const BITBUCKET_SECRET_FIELDS = ["accessToken", "apiToken"] as const;
 
+const TTS_API_KEY_SECRET_NAME = "tts-api-key";
+export { TTS_API_KEY_SECRET_NAME };
+
+/** Whether a settings value is the marker meaning "a value is saved in the secret store". */
+export const isSecretRedacted = (value: string): boolean => value === SECRET_REDACTED;
+
 /** Hosts are case-insensitive; a patch can arrive before decoding lowercased its keys. */
 function gitHubTokenSecretName(host: string): string {
   return `github-token-${Buffer.from(host.trim().toLowerCase(), "utf8").toString("base64url")}`;
@@ -217,7 +223,11 @@ export function redactServerSettingsForClient(settings: ServerSettings): ServerS
       Object.entries(settings.github.tokens).map(([host, token]) => [host, redactSecret(token)]),
     ),
   };
-  return { ...settings, providerInstances, usageLimitSources, bitbucket, github };
+  const tts = {
+    ...settings.tts,
+    apiKey: redactSecret(settings.tts.apiKey),
+  };
+  return { ...settings, providerInstances, usageLimitSources, bitbucket, github, tts };
 }
 
 export function applyProviderInstanceMutation(
@@ -724,8 +734,9 @@ const make = Effect.gen(function* () {
   );
 
   /**
-   * Moves Bitbucket tokens hand-edited into settings.json into the secret store as they load,
-   * so plaintext does not stay on disk. If the store is unavailable, the token keeps working
+   * Moves Bitbucket tokens, GitHub tokens, and the TTS API key hand-edited into
+   * settings.json into the secret store as they load, so plaintext does not
+   * stay on disk. If the store is unavailable, the value keeps working
    * from the file and the move is retried on the next load.
    */
   const moveInlineBitbucketTokens = (settings: ServerSettings) =>
@@ -766,7 +777,26 @@ const make = Effect.gen(function* () {
         tokens[host] = SECRET_REDACTED;
         moved = true;
       }
-      return moved ? { ...settings, bitbucket, github: { ...settings.github, tokens } } : settings;
+      const tts = { ...settings.tts };
+      if (tts.apiKey.length > 0 && tts.apiKey !== SECRET_REDACTED) {
+        const stored = yield* secretStore
+          .set(TTS_API_KEY_SECRET_NAME, textEncoder.encode(tts.apiKey))
+          .pipe(
+            Effect.as(true),
+            Effect.catch(() =>
+              Effect.logWarning("failed to move the TTS API key into the secret store").pipe(
+                Effect.as(false),
+              ),
+            ),
+          );
+        if (stored) {
+          tts.apiKey = SECRET_REDACTED;
+          moved = true;
+        }
+      }
+      return moved
+        ? { ...settings, bitbucket, github: { ...settings.github, tokens }, tts }
+        : settings;
     });
 
   const loadSettingsFromDisk = Effect.gen(function* () {
@@ -1159,6 +1189,36 @@ const make = Effect.gen(function* () {
         });
       }
 
+      const tts = { ...next.tts };
+      {
+        let value = tts.apiKey;
+        if (value === SECRET_REDACTED) {
+          // The marker keeps what is saved; a hand-edited plaintext key moves into the store.
+          const inline = current.tts.apiKey;
+          if (inline === SECRET_REDACTED || inline.length === 0) {
+            value = SECRET_REDACTED;
+          } else {
+            value = inline;
+          }
+        }
+        if (value.length === 0) {
+          if (tts.apiKey !== "") {
+            changes.push({
+              kind: "remove",
+              secretName: TTS_API_KEY_SECRET_NAME,
+              operation: "remove-secret",
+            });
+          }
+        } else if (value !== SECRET_REDACTED) {
+          changes.push({
+            kind: "write",
+            secretName: TTS_API_KEY_SECRET_NAME,
+            value: textEncoder.encode(value),
+          });
+          tts.apiKey = SECRET_REDACTED;
+        }
+      }
+
       return {
         settings: {
           ...next,
@@ -1166,6 +1226,7 @@ const make = Effect.gen(function* () {
           usageLimitSources: usageLimitSources as ServerSettings["usageLimitSources"],
           bitbucket,
           github: { ...next.github, tokens },
+          tts,
         },
         changes,
       };

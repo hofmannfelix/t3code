@@ -478,6 +478,7 @@ export const WS_METHODS = {
   serverGetStorageCleanupReport: "server.getStorageCleanupReport",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
+  serverTtsSynthesize: "server.ttsSynthesize",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
@@ -764,6 +765,25 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
   }),
   success: ServerSettings,
   error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+/**
+ * The server could not produce speech for the requested text. Clients fall
+ * back to their platform voices instead of surfacing this to the user.
+ */
+export class TtsError extends Schema.TaggedError<TtsError>()("TtsError", {
+  reason: Schema.Literals(["not-configured", "provider-failed"]),
+  message: Schema.String,
+}) {}
+
+const WsServerTtsSynthesizeRpc = Rpc.make(WS_METHODS.serverTtsSynthesize, {
+  payload: Schema.Struct({ text: TrimmedNonEmptyString }),
+  /** A server-relative audio URL resolved against the environment's HTTP origin, like asset URLs. */
+  success: Schema.Struct({
+    relativeUrl: Schema.String,
+    expiresAt: Schema.Number,
+  }),
+  error: Schema.Union([TtsError, EnvironmentAuthorizationError]),
 });
 
 const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -1864,6 +1884,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetStorageCleanupReportRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
+  WsServerTtsSynthesizeRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerSearchAcpRegistryRpc,
   WsServerPrepareAcpRegistryAgentRpc,

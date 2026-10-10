@@ -848,6 +848,22 @@ export const GitHubSettings = Schema.Struct({
 });
 export type GitHubSettings = typeof GitHubSettings.Type;
 
+/**
+ * Cloud text-to-speech for the clients' read-aloud action, following the
+ * OpenAI-compatible `/audio/speech` API shape so OpenAI, Groq, and self-hosted
+ * gateways work with one configuration. The API key lives in the server's
+ * secret store; settings and clients only see a redaction marker when one is
+ * saved. Empty fields fall back to the OpenAI defaults the server applies,
+ * and clients without a key read messages with the platform's own voices.
+ */
+export const TtsSettings = Schema.Struct({
+  baseUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  model: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  voice: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  apiKey: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+});
+export type TtsSettings = typeof TtsSettings.Type;
+
 export const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -1279,6 +1295,7 @@ export const ServerSettings = Schema.Struct({
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   bitbucket: BitbucketSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   github: GitHubSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  tts: TtsSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // Keyed by a user-chosen id so a source keeps its rows across edits. Entries
   // this build cannot decode round-trip untouched, as provider instances do.
   usageLimitSources: Schema.Record(UsageLimitSourceId, UsageLimitSourceConfig).pipe(
@@ -1538,6 +1555,15 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Struct({
       hosts: Schema.optionalKey(Schema.Record(GitHubHost, GitHubHostSettings)),
       tokens: Schema.optionalKey(Schema.Record(GitHubHost, TrimmedString)),
+    }),
+  ),
+  /** An empty API key clears it; an omitted one or the redaction marker keeps what the server has. */
+  tts: Schema.optionalKey(
+    Schema.Struct({
+      baseUrl: Schema.optionalKey(TrimmedString),
+      model: Schema.optionalKey(TrimmedString),
+      voice: Schema.optionalKey(TrimmedString),
+      apiKey: Schema.optionalKey(TrimmedString),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual

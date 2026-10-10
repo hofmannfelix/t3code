@@ -186,6 +186,7 @@ import {
   timelineContentOverflowsViewport,
 } from "./timelineScrollAnchoring";
 import { MessageCopyButton } from "./MessageCopyButton";
+import { MessageSpeakButton } from "./MessageSpeakButton";
 import { PierreEntryIcon } from "./PierreEntryIcon";
 import { inferEntryKindFromPath } from "../../pierre-icons";
 import { AssistantSelectionToolbar } from "./AssistantSelectionToolbar";
@@ -2901,6 +2902,7 @@ function AssistantMessageMeta({
         showCopyButton={showCopyButton}
         streaming={copyStreaming}
       />
+      <AssistantSpeakButton message={message} showSpeakButton={showCopyButton && !copyStreaming} />
       {projectedItem?.item.type === "assistant_message" ? (
         <AssistantForkButton projectedItem={projectedItem} />
       ) : null}
@@ -2938,6 +2940,32 @@ function AssistantCopyButton({
   }
 
   return <MessageCopyButton text={assistantCopyState.text ?? ""} variant="ghost" />;
+}
+
+/**
+ * Read-aloud rides the copy button's visibility gates: the same finished,
+ * non-empty assistant text is what gets spoken. An empty read-aloud key
+ * hides the control instead of failing on click.
+ */
+function AssistantSpeakButton({
+  message,
+  showSpeakButton,
+}: {
+  message: ChatMessage;
+  showSpeakButton: boolean;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const text = message.text ?? "";
+  if (!showSpeakButton || text.trim().length === 0) {
+    return null;
+  }
+  return (
+    <MessageSpeakButton
+      messageKey={message.id}
+      environmentId={ctx.activeThreadEnvironmentId}
+      text={text}
+    />
+  );
 }
 
 function ProposedPlanTimelineRow({

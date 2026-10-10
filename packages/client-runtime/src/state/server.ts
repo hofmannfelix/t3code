@@ -1205,6 +1205,14 @@ export function createServerEnvironmentAtoms<R, E>(
       concurrency: configConcurrency,
     }),
     updateSettings,
+    ttsSynthesize: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:tts-synthesize",
+      tag: WS_METHODS.serverTtsSynthesize,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ input }) => input.text,
+      },
+    }),
     // Provider-instance mutations share the settings command and its
     // environment-serial scheduler. The named boundary keeps clients on the
     // atomic map-entry payload instead of rebuilding a stale whole map.

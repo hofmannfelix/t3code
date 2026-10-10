@@ -39,6 +39,7 @@ import {
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { traceRelayRequest } from "./cloud/traceRelayRequest.ts";
+import * as TextToSpeech from "./tts/TextToSpeech.ts";
 import {
   annotateEnvironmentRequest,
   failEnvironmentScopeRequired,
@@ -443,6 +444,31 @@ export const layerAssetRoute = HttpRouter.add(
     ).pipe(
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
     );
+  }),
+);
+
+export const layerTtsAudioRoute = HttpRouter.add(
+  "GET",
+  "/api/tts-audio/*",
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const url = HttpServerRequest.toURL(request);
+    if (Option.isNone(url)) {
+      return HttpServerResponse.text("Bad Request", { status: 400 });
+    }
+    const token = url.value.pathname.slice("/api/tts-audio/".length);
+    const textToSpeech = yield* TextToSpeech.TextToSpeech;
+    const clip = yield* token ? textToSpeech.clip(token) : Effect.succeedNone;
+    if (Option.isNone(clip)) {
+      return HttpServerResponse.text("Not Found", {
+        status: 404,
+        headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+      });
+    }
+    return HttpServerResponse.uint8Array(clip.value.bytes, {
+      contentType: clip.value.mimeType,
+      headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+    });
   }),
 );
 

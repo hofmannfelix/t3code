@@ -665,6 +665,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["allow disable enable open drive preview tools sessions project override"],
   },
   {
+    id: "read-aloud",
+    title: "Read aloud",
+    to: "/settings/integrations",
+    targetId: "read-aloud",
+    searchTerms: ["tts text to speech voice speak messages audio openai groq api key"],
+  },
+  {
     id: "device-hosts",
     title: "Device hosts",
     to: "/settings/integrations",
