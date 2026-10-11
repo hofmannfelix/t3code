@@ -110,9 +110,9 @@ function resolveAppVariant(value: string | undefined): AppVariant {
 }
 
 const variant = VARIANT_CONFIG[APP_VARIANT];
-const iosBundleIdentifier = isIosPersonalTeamBuild
-  ? personalTeamBundleIdentifier!
-  : variant.iosBundleIdentifier;
+const iosBundleIdentifier =
+  repoEnv.T3CODE_IOS_BUNDLE_ID?.trim() ||
+  (isIosPersonalTeamBuild ? personalTeamBundleIdentifier! : variant.iosBundleIdentifier);
 
 const dmSansFonts = {
   regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
@@ -258,10 +258,16 @@ const config: ExpoConfig = {
     appleTeamId:
       repoEnv.T3CODE_IOS_APPLE_TEAM_ID?.trim() ||
       (isIosPersonalTeamBuild ? undefined : "ARK85ZXQ4Z"),
-    associatedDomains: [
-      `applinks:${variant.relyingParty}`,
-      `webcredentials:${variant.relyingParty}`,
-    ],
+    // Personal-team wildcard profiles cannot include Associated Domains, so
+    // universal links and saved passwords stay off for those builds.
+    ...(isIosPersonalTeamBuild
+      ? {}
+      : {
+          associatedDomains: [
+            `applinks:${variant.relyingParty}`,
+            `webcredentials:${variant.relyingParty}`,
+          ],
+        }),
     entitlements: {
       "keychain-access-groups": [`$(AppIdentifierPrefix)${iosBundleIdentifier}`],
     },
@@ -323,6 +329,11 @@ const config: ExpoConfig = {
     favicon: variant.assets.appIcon,
   },
   plugins: [
+    // Expo executes mod hooks in reverse plugin-array order, so listing the
+    // capability stripper first makes its entitlements mod run last — after
+    // expo-notifications and Clerk add what a personal-team wildcard profile
+    // cannot sign.
+    ...(isIosPersonalTeamBuild ? ["./plugins/withoutIosPersonalTeamCapabilities.cjs"] : []),
     "expo-asset",
     [
       "expo-font",
@@ -468,7 +479,6 @@ const config: ExpoConfig = {
     "./plugins/withAndroidModernAlertDialog.cjs",
     "./plugins/withAndroidPredictiveBackCompat.cjs",
     "./plugins/withAndroidTabletOrientation.cjs",
-    ...(isIosPersonalTeamBuild ? ["./plugins/withoutIosPersonalTeamCapabilities.cjs"] : []),
   ],
   extra: {
     appVariant: APP_VARIANT,
