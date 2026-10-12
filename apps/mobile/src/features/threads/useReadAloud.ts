@@ -38,16 +38,22 @@ type Listener = () => void;
 const listeners = new Set<Listener>();
 
 /**
- * Lead chunk (first sentence) for fast first audio, then the next two
- * sentences, then the rest in one request: at most three provider calls, and
- * chunks 1+2 cover ~12s of playback while the rest is still synthesizing.
+ * Exponential lead: the first sentence plays in ~1-2s, then chunks of 2, 4
+ * and 8 sentences, then the rest in one request. Every chunk covers more
+ * playback time than its synthesis takes, so playback never waits, and a
+ * long reply costs at most five provider calls.
  */
 const chunkReply = (text: string): string[] => {
   const sentences = text.match(/[^.!?…]+[.!?…]+["'»)]*\s*|[^.!?…]+$/g) ?? [text];
-  if (sentences.length <= 3) return [text];
-  return [sentences[0], sentences.slice(1, 3).join(""), sentences.slice(3).join("")].filter(
-    (chunk) => chunk.trim().length > 0,
-  );
+  const chunks: string[] = [];
+  let index = 0;
+  for (const size of [1, 2, 4, 8]) {
+    if (index >= sentences.length) break;
+    chunks.push(sentences.slice(index, index + size).join(" "));
+    index += size;
+  }
+  if (index < sentences.length) chunks.push(sentences.slice(index).join(" "));
+  return chunks.filter((chunk) => chunk.trim().length > 0);
 };
 
 let currentSpeech: ReadAloudSpeech = IDLE;
