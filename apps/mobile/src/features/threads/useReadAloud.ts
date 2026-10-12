@@ -238,6 +238,8 @@ export function useReadAloud(environmentId: EnvironmentId) {
           }, START_WATCHDOG_MS);
           playerSubscription = clipPlayer.addListener("playbackStatusUpdate", (status) => {
             if (!isCurrent()) return;
+            // Remote clips need preparation before play() takes effect.
+            if (!started && status.isLoaded) clipPlayer.play();
             if (status.playing && !started) {
               started = true;
               clearTimeout(startWatchdog);
