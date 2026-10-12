@@ -290,6 +290,15 @@ function ReadAloudSettingsRows() {
 
   const checked = referenceSettings.tts?.autoReadAloud ?? false;
 
+  const writeChunkedPlayback = (value: boolean) => {
+    for (const target of syncTargets) {
+      updateSettings({
+        environmentId: target.environment.environmentId,
+        input: { patch: { tts: { chunkedPlayback: value } } },
+      });
+    }
+  };
+
   return (
     <SettingsSection title="Read aloud">
       <SettingsSwitchRow
@@ -305,6 +314,13 @@ function ReadAloudSettingsRows() {
             });
           }
         }}
+      />
+      <SettingsSwitchRow
+        icon="speaker.wave.2"
+        label="Load replies in sentence chunks"
+        subtitle="Starts playback in seconds by speaking sentence groups (1, 2, 4, 8) while the rest synthesizes."
+        value={referenceSettings.tts?.chunkedPlayback ?? true}
+        onValueChange={writeChunkedPlayback}
       />
     </SettingsSection>
   );

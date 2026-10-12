@@ -46,6 +46,8 @@ interface ReadItem {
 /** Set by the hook on every render; the module-level queue plays through it. */
 let enqueueCounter = 0;
 let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
+/** Off = the whole reply in one request; on = exponential sentence chunks. */
+let chunkedPlayback = true;
 
 const listeners = new Set<Listener>();
 
@@ -115,6 +117,9 @@ const playNextFromQueue = () => {
  */
 export function useSpokenMessage(environmentId: EnvironmentId) {
   const tts = useEnvironmentSettings(environmentId, (settings) => settings.tts);
+  useEffect(() => {
+    chunkedPlayback = tts.chunkedPlayback ?? true;
+  }, [tts.chunkedPlayback]);
   const preparedConnection = usePreparedConnection(environmentId);
   const ttsSynthesize = useAtomCommand(serverEnvironment.ttsSynthesize, {
     label: "speak message",
@@ -132,7 +137,7 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
 
   const speak = useCallback((input: { readonly key: string; readonly text: string }) => {
     stopCurrent();
-    const chunks = chunkReply(input.text);
+    const chunks = chunkedPlayback ? chunkReply(input.text) : [input.text];
     const lead = chunks[0];
     if (lead === undefined) return;
     playThroughCurrentDeps?.({ key: input.key, text: lead, source: "manual" as const });

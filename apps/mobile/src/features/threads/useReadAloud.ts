@@ -55,6 +55,8 @@ let readQueue: Array<QueueEntry> = [];
 let player: AudioPlayer | null = null;
 let playerSubscription: { remove: () => void } | null = null;
 let runCounter = 0;
+/** Off = the whole reply in one request; on = exponential sentence chunks. */
+let chunkedPlayback = true;
 let lastFailureAt = 0;
 let enqueueCounter = 0;
 let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
@@ -129,6 +131,11 @@ export function useReadAloud(environmentId: EnvironmentId) {
     label: "speak message",
     reportFailure: false,
   });
+  const ttsSettings = useAtomValue(serverEnvironment.settingsValueAtom(environmentId));
+  useEffect(() => {
+    chunkedPlayback =
+      ttsSettings?.tts?.chunkedPlayback ?? DEFAULT_SERVER_SETTINGS.tts.chunkedPlayback ?? true;
+  }, [ttsSettings]);
 
   const subscribe = useCallback((listener: Listener) => {
     listeners.add(listener);
@@ -145,7 +152,7 @@ export function useReadAloud(environmentId: EnvironmentId) {
 
   const speak = useCallback((item: { readonly key: string; readonly text: string }) => {
     stopCurrent();
-    const chunks = chunkReply(item.text);
+    const chunks = chunkedPlayback ? chunkReply(item.text) : [item.text];
     const lead = chunks[0];
     if (lead === undefined) return;
     setSpeech({

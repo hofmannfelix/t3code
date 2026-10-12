@@ -864,6 +864,8 @@ export const TtsSettings = Schema.Struct({
   /** Empty selects the OpenAI-compatible `/audio/speech` shape; `gemini` uses the Gemini API. */
   provider: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   autoReadAloud: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** Off plays the whole reply in one request; on splits it 1-2-4-8 sentences for faster first audio. */
+  chunkedPlayback: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 export type TtsSettings = typeof TtsSettings.Type;
 
@@ -1569,6 +1571,7 @@ export const ServerSettingsPatch = Schema.Struct({
       apiKey: Schema.optionalKey(TrimmedString),
       provider: Schema.optionalKey(TrimmedString),
       autoReadAloud: Schema.optionalKey(Schema.Boolean),
+      chunkedPlayback: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual

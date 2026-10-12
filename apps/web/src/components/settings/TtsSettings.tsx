@@ -118,6 +118,14 @@ export function TtsSettings({
     if (result._tag === "Success") onSaved();
   };
 
+  const setChunkedPlayback = async (checked: boolean) => {
+    const result = await updateSettings({
+      environmentId,
+      input: { patch: { tts: { chunkedPlayback: checked } } },
+    });
+    if (result._tag === "Success") onSaved();
+  };
+
   const setProvider = async (value: string) => {
     const result = await updateSettings({
       environmentId,
@@ -203,6 +211,23 @@ export function TtsSettings({
               </InlineButton>
             )}
           </p>
+        </div>
+        <div
+          data-slot="settings-row"
+          className="flex items-center justify-between gap-3 border-t border-border/50 px-3 py-3 sm:px-4"
+        >
+          <div className="grid gap-0.5">
+            <Label htmlFor={`tts-chunked-${environmentId}`}>Load replies in sentence chunks</Label>
+            <p className="text-xs text-muted-foreground">
+              Exponential chunks (1, 2, 4, 8 sentences) start playback in seconds; off synthesizes
+              the whole reply in one request before it plays.
+            </p>
+          </div>
+          <Switch
+            id={`tts-chunked-${environmentId}`}
+            checked={tts.chunkedPlayback}
+            onCheckedChange={(checked) => void setChunkedPlayback(checked)}
+          />
         </div>
         <div
           data-slot="settings-row"
