@@ -43,6 +43,8 @@ interface ThreadFeedMessageEntry {
 const IDLE: ReadAloudSpeech = { key: null, phase: null, source: null, queued: 0 };
 
 const START_WATCHDOG_MS = 5_000;
+/** A request that takes this long means the connection is down; fail visibly. */
+const SYNTHESIZE_TIMEOUT_MS = 20_000;
 
 type Listener = () => void;
 
@@ -206,10 +208,15 @@ export function useReadAloud(environmentId: EnvironmentId) {
         }
         if (!isCurrent()) return;
         try {
-          const result = await ttsSynthesize({
-            environmentId,
-            input: { text: item.text },
-          });
+          const result = await Promise.race([
+            ttsSynthesize({
+              environmentId,
+              input: { text: item.text },
+            }),
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error("synthesize-timeout")), SYNTHESIZE_TIMEOUT_MS);
+            }),
+          ]);
           if (!isCurrent()) return;
           if (result._tag !== "Success") {
             announceExhausted(
@@ -256,7 +263,11 @@ export function useReadAloud(environmentId: EnvironmentId) {
           });
           clipPlayer.play();
         } catch {
-          if (isCurrent()) announceExhausted(item, "The server could not be reached.");
+          if (!isCurrent()) return;
+          announceExhausted(
+            item,
+            "flexbook did not answer. Check the connection (the thread header shows it) and try again.",
+          );
         }
       };
       void startPlayback();
