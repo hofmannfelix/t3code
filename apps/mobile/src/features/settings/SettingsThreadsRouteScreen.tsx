@@ -47,6 +47,7 @@ export function SettingsThreadsRouteScreen() {
           contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
         >
           <AutoSettleSettingsRows />
+          <ReadAloudSettingsRows />
           <BetaSettingsSection />
           <LegacySettingsSection />
         </ScrollView>
@@ -264,6 +265,51 @@ function AutoSettleSettingsRows() {
  * Device-local beta toggles, the counterpart of web's Working section (beta)
  * in Settings → General.
  */
+/**
+ * Read-aloud automation per environment: provider and key live on the server
+ * (configured from the desktop), the phone only flips the auto-read switch
+ * that feeds finished replies into the speaking queue.
+ */
+function ReadAloudSettingsRows() {
+  const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
+  const projectSelected = selectedProjectKey !== null;
+  const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
+  const syncEnvironments = selectedTargets.filter(supportsSharedSettingsSync);
+  const syncTargets = resolveMobileSettingsTargets(
+    syncEnvironments,
+    projectSelected ? (selectedProject?.members.map((member) => member.project) ?? []) : null,
+  );
+  const reference = syncTargets[0] ?? null;
+  const referenceSettings = reference?.settings ?? null;
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
+    label: "read-aloud settings update",
+    reportFailure: true,
+  });
+
+  if (reference === null || referenceSettings === null) return null;
+
+  const checked = referenceSettings.tts?.autoReadAloud ?? false;
+
+  return (
+    <SettingsSection title="Read aloud">
+      <SettingsSwitchRow
+        icon="speaker.wave.2"
+        label="Read new replies aloud"
+        subtitle="Speaks every finished reply with the server's voice."
+        value={checked}
+        onValueChange={(value) => {
+          for (const target of syncTargets) {
+            updateSettings({
+              environmentId: target.environment.environmentId,
+              input: { patch: { tts: { autoReadAloud: value } } },
+            });
+          }
+        }}
+      />
+    </SettingsSection>
+  );
+}
+
 function BetaSettingsSection() {
   const savePreferences = useAtomSet(updateMobilePreferencesAtom);
   const preferences = useAtomValue(mobilePreferencesAtom);

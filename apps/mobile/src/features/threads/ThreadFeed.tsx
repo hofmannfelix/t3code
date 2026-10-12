@@ -105,6 +105,7 @@ import { IOS_NAV_BAR_HEIGHT } from "../../lib/layoutMetrics";
 import { useFontFamily } from "../../lib/useFontFamily";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
+import { useReadAloud, useReadAloudAutoAnnounce } from "./useReadAloud";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { downloadAndShareAttachment } from "../../lib/attachmentDownload";
 import { hasWideMarkdownBlock } from "../../lib/wideMarkdownBlocks";
@@ -386,6 +387,34 @@ function AssistantForkButton(props: {
           tintColor={props.iconColor}
           type="monochrome"
         />
+      )}
+    </Pressable>
+  );
+}
+
+function ReadAloudButton(props: {
+  readonly messageKey: string;
+  readonly text: string;
+  readonly environmentId: EnvironmentId;
+  readonly iconColor: ColorValue;
+}) {
+  const { speech, speak, stop } = useReadAloud(props.environmentId);
+  const isSpeakingThis = speech.key === props.messageKey;
+
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={isSpeakingThis ? "Stop reading aloud" : "Read aloud"}
+      onPress={() => {
+        if (isSpeakingThis) stop();
+        else speak({ key: props.messageKey, text: props.text });
+      }}
+      className="h-7 w-7 items-center justify-center"
+    >
+      {isSpeakingThis ? (
+        <SymbolView name="stop.fill" size={13} tintColor={props.iconColor} type="monochrome" />
+      ) : (
+        <SymbolView name="speaker.wave.2" size={13} tintColor={props.iconColor} type="monochrome" />
       )}
     </Pressable>
   );
@@ -1961,6 +1990,12 @@ function renderFeedEntry(
               buttonSize={28}
               iconSize={13}
             />
+            <ReadAloudButton
+              messageKey={message.id}
+              text={renderedText}
+              environmentId={props.environmentId}
+              iconColor={iconSubtleColor}
+            />
             {message.projectedItem ? (
               <AssistantForkButton
                 environmentId={props.environmentId}
@@ -2218,6 +2253,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const [viewportWidth, setViewportWidth] = useState(() =>
     props.layoutVariant === "split" ? 0 : windowWidth,
   );
+  useReadAloudAutoAnnounce({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    feed: props.feed,
+  });
   const [viewportHeight, setViewportHeight] = useState(0);
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
   // Live-follow latch (#5566). LegendList's maintainScrollAtEnd alone re-pins
