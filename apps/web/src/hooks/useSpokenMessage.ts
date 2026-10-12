@@ -1,4 +1,5 @@
 import type { EnvironmentId } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 
 import { useEnvironmentSettings } from "~/hooks/useSettings";
@@ -168,7 +169,7 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
   // effects that run after this one.
   const hasApiKey = tts.apiKey.length > 0;
 
-  const notifyFailure = () => {
+  const notifyFailure = (detail?: string) => {
     // A dropped queue already announced itself; a rapid cascade would only stack toasts.
     const now = Date.now();
     if (now - lastFailureToastAt < 15_000) return;
@@ -176,14 +177,16 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
     toastManager.add({
       type: "error",
       title: "Read aloud unavailable",
-      description: hasApiKey
-        ? "Cloud TTS failed and this app's built-in voices did not play. Check the provider settings under Integrations → Read aloud."
-        : "This app's built-in voices did not play and no cloud TTS provider is configured. Set one under Integrations → Read aloud.",
+      description:
+        detail ??
+        (hasApiKey
+          ? "Cloud TTS failed and this app's built-in voices did not play. Check the provider settings under Integrations → Read aloud."
+          : "This app's built-in voices did not play and no cloud TTS provider is configured. Set one under Integrations → Read aloud."),
     });
   };
 
-  const announceExhausted = (item: ReadItem) => {
-    notifyFailure();
+  const announceExhausted = (item: ReadItem, detail?: string) => {
+    notifyFailure(detail);
     if (item.source === "auto") readQueue = [];
     setSpeech({ ...IDLE, queued: 0 });
   };
@@ -255,8 +258,25 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
           return;
         }
         const result = await ttsSynthesize({ environmentId, input: { text: item.text } });
-        if (!isCurrent() || result._tag !== "Success") {
-          if (isCurrent()) speakWithBrowser();
+        if (!isCurrent()) return;
+        if (result._tag !== "Success") {
+          // Mit konfiguriertem Provider keinen stillen Fallback: der Nutzer
+          // sieht den Fehlercode, statt unvermittelt die Systemstimme zu hören.
+          const failureOption = Cause.findErrorOption(result.cause);
+          const failure =
+            failureOption._tag === "Some"
+              ? (failureOption.value as { reason?: string; message?: string })
+              : undefined;
+          const detail =
+            failure?.message !== undefined
+              ? `${failure.message}${failure.reason ? ` (${failure.reason})` : ""}`
+              : undefined;
+          if (hasApiKey) {
+            announceExhausted(item, detail);
+          } else {
+            notifyFailure(detail);
+            speakWithBrowser();
+          }
           return;
         }
         const url = resolveAssetUrl(connection.httpBaseUrl, result.value.relativeUrl);
@@ -268,7 +288,11 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
         const onClipError = () => {
           if (!isCurrent()) return;
           clip.removeEventListener("error", onClipError);
-          speakWithBrowser();
+          if (hasApiKey) {
+            announceExhausted(item, "The reply clip could not be played.");
+          } else {
+            speakWithBrowser();
+          }
         };
         clip.addEventListener("playing", () => {
           if (!isCurrent()) return;
@@ -311,7 +335,11 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
         void clip.play().catch(() => {
           if (isCurrent() && audio === clip) {
             audio = null;
-            speakWithBrowser();
+            if (hasApiKey) {
+              announceExhausted(item, "The reply clip could not be played.");
+            } else {
+              speakWithBrowser();
+            }
           }
         });
       };
