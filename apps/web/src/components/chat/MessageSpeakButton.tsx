@@ -34,9 +34,10 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
   }, [speech]);
 
   useEffect(() => {
-    // Virtualized rows unmount when scrolled away; keep no orphaned playback.
+    // Virtualized rows unmount when scrolled away. A manual read dies with its
+    // row ("no orphaned playback"); an auto-read keeps playing radio-style.
     return () => {
-      if (speechRef.current.key === messageKey) stop();
+      if (speechRef.current.key === messageKey && speechRef.current.source === "manual") stop();
     };
   }, [messageKey, stop]);
 

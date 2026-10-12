@@ -7,6 +7,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { Button, InlineButton } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { Switch } from "../ui/switch";
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MODEL = "tts-1";
@@ -72,6 +73,14 @@ export function TtsSettings({
     }
   };
 
+  const setAutoReadAloud = async (checked: boolean) => {
+    const result = await updateSettings({
+      environmentId,
+      input: { patch: { tts: { autoReadAloud: checked } } },
+    });
+    if (result._tag === "Success") onSaved();
+  };
+
   const draft = (field: keyof typeof drafts) => (value: string) =>
     setDrafts((current) => ({ ...current, [field]: value }));
 
@@ -83,6 +92,20 @@ export function TtsSettings({
         void save();
       }}
     >
+      <div className="flex items-center justify-between gap-3">
+        <div className="grid gap-0.5">
+          <Label htmlFor={`tts-auto-read-${environmentId}`}>Read new replies aloud</Label>
+          <p className="text-xs text-muted-foreground">
+            Automatically speaks every finished reply, one after another. A manual read still takes
+            over and clears the queue.
+          </p>
+        </div>
+        <Switch
+          id={`tts-auto-read-${environmentId}`}
+          checked={tts.autoReadAloud}
+          onCheckedChange={(checked) => void setAutoReadAloud(checked)}
+        />
+      </div>
       {/* Locked while saving: a successful save clears the drafts, which would drop edits made mid-request. */}
       <fieldset disabled={saving} className="contents">
         <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">

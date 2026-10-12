@@ -861,6 +861,7 @@ export const TtsSettings = Schema.Struct({
   model: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   voice: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   apiKey: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  autoReadAloud: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type TtsSettings = typeof TtsSettings.Type;
 
@@ -1564,6 +1565,7 @@ export const ServerSettingsPatch = Schema.Struct({
       model: Schema.optionalKey(TrimmedString),
       voice: Schema.optionalKey(TrimmedString),
       apiKey: Schema.optionalKey(TrimmedString),
+      autoReadAloud: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual

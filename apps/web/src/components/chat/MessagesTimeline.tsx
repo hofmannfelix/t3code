@@ -270,7 +270,8 @@ import { chatMarkdownClipboardPayload } from "../../markdown-clipboard";
 import { ContextChip, ContextChipLabel, type ContextChipKind } from "../ContextChip";
 import { createContextPresentationRegistry } from "../contextPresentationRegistry";
 import { useOpenPrLink } from "~/lib/openPullRequestLink";
-import { useClientSettings } from "~/hooks/useSettings";
+import { useClientSettings, useEnvironmentSettings } from "~/hooks/useSettings";
+import { useAutoReadAloud } from "~/hooks/useAutoReadAloud";
 import type { ChatMarkdownContextReference } from "../ChatMarkdown";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
@@ -920,6 +921,13 @@ const ConversationTimeline = memo(function ConversationTimeline({
     worktreeSetup,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
+  const autoReadTts = useEnvironmentSettings(activeThreadEnvironmentId, (settings) => settings.tts);
+  useAutoReadAloud({
+    rows,
+    environmentId: activeThreadEnvironmentId,
+    enabled: autoReadTts.autoReadAloud,
+    threadKey: routeThreadKey,
+  });
   // Run status/timestamps churn on every stream event; the shared row context
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
