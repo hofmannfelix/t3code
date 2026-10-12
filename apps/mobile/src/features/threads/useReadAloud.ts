@@ -1,6 +1,11 @@
 import { DEFAULT_SERVER_SETTINGS, type EnvironmentId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import { createAudioPlayer, type AudioPlayer } from "expo-audio";
+import {
+  createAudioPlayer,
+  setAudioModeAsync,
+  setIsAudioActiveAsync,
+  type AudioPlayer,
+} from "expo-audio";
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { Alert } from "react-native";
 
@@ -21,6 +26,10 @@ interface ReadItem {
   readonly source: "manual" | "auto";
 }
 
+interface QueueEntry extends ReadItem {
+  readonly dedupeKey: string;
+}
+
 interface ThreadFeedMessageEntry {
   readonly type: "message";
   readonly message: {
@@ -32,37 +41,20 @@ interface ThreadFeedMessageEntry {
 }
 
 const IDLE: ReadAloudSpeech = { key: null, phase: null, source: null, queued: 0 };
+
 const START_WATCHDOG_MS = 5_000;
 
 type Listener = () => void;
 
 const listeners = new Set<Listener>();
 
-/**
- * Exponential lead: the first sentence plays in ~1-2s, then chunks of 2, 4
- * and 8 sentences, then the rest in one request. Every chunk covers more
- * playback time than its synthesis takes, so playback never waits, and a
- * long reply costs at most five provider calls.
- */
-const chunkReply = (text: string): string[] => {
-  const sentences = text.match(/[^.!?…]+[.!?…]+["'»)]*\s*|[^.!?…]+$/g) ?? [text];
-  const chunks: string[] = [];
-  let index = 0;
-  for (const size of [1, 2, 4, 8]) {
-    if (index >= sentences.length) break;
-    chunks.push(sentences.slice(index, index + size).join(" "));
-    index += size;
-  }
-  if (index < sentences.length) chunks.push(sentences.slice(index).join(" "));
-  return chunks.filter((chunk) => chunk.trim().length > 0);
-};
-
 let currentSpeech: ReadAloudSpeech = IDLE;
-let readQueue: Array<ReadItem & { readonly dedupeKey: string }> = [];
+let readQueue: Array<QueueEntry> = [];
 let player: AudioPlayer | null = null;
 let playerSubscription: { remove: () => void } | null = null;
 let runCounter = 0;
 let lastFailureAt = 0;
+let enqueueCounter = 0;
 let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
 
 const setSpeech = (next: ReadAloudSpeech) => {
@@ -104,6 +96,25 @@ const announceExhausted = (item: ReadItem, message: string) => {
 };
 
 /**
+ * Exponential lead: the first sentence plays in ~1-2s, then chunks of 2, 4
+ * and 8 sentences, then the rest in one request. Every chunk covers more
+ * playback time than its synthesis takes, so playback never waits, and a
+ * long reply costs at most five provider calls.
+ */
+const chunkReply = (text: string): string[] => {
+  const sentences = text.match(/[^.!?…]+[.!?…]+["'»)]*\s*|[^.!?…]+$/g) ?? [text];
+  const chunks: string[] = [];
+  let index = 0;
+  for (const size of [1, 2, 4, 8]) {
+    if (index >= sentences.length) break;
+    chunks.push(sentences.slice(index, index + size).join(" "));
+    index += size;
+  }
+  if (index < sentences.length) chunks.push(sentences.slice(index).join(" "));
+  return chunks.filter((chunk) => chunk.trim().length > 0);
+};
+
+/**
  * Read-aloud for the phone: the paired server synthesizes the reply with its
  * configured provider, the clip is fetched over the connection, and
  * expo-audio plays it. One voice at a time; auto-read replies queue up, a
@@ -116,6 +127,7 @@ export function useReadAloud(environmentId: EnvironmentId) {
     label: "speak message",
     reportFailure: false,
   });
+
   const subscribe = useCallback((listener: Listener) => {
     listeners.add(listener);
     return () => listeners.delete(listener);
@@ -134,7 +146,12 @@ export function useReadAloud(environmentId: EnvironmentId) {
     const chunks = chunkReply(item.text);
     const lead = chunks[0];
     if (lead === undefined) return;
-    playThroughCurrentDeps?.({ key: item.key, text: lead, source: "manual" as const });
+    setSpeech({
+      key: item.key,
+      phase: "loading",
+      source: "manual",
+      queued: readQueue.length,
+    });
     for (let index = 1; index < chunks.length; index++) {
       const text = chunks[index];
       if (text === undefined) continue;
@@ -142,7 +159,7 @@ export function useReadAloud(environmentId: EnvironmentId) {
         key: item.key,
         dedupeKey: `${item.key}#${index}`,
         text,
-        source: "auto" as const,
+        source: "auto",
       });
     }
     if (currentSpeech.key === null) playNextFromQueue();
@@ -152,85 +169,99 @@ export function useReadAloud(environmentId: EnvironmentId) {
     stopCurrent();
   }, []);
 
-  let enqueueCounter = 0;
   const enqueue = useCallback((item: { readonly key: string; readonly text: string }) => {
     enqueueCounter += 1;
     readQueue.push({
       key: item.key,
       dedupeKey: `${item.key}#${enqueueCounter}`,
       text: item.text,
-      source: "auto" as const,
+      source: "auto",
     });
     if (currentSpeech.key === null) playNextFromQueue();
   }, []);
 
-  // Fresh closure after every commit; the queue plays through it. (The
-  // assignment lives in an effect because native tsc's parser chokes on a
-  // module-let arrow assignment directly inside the useEffect callback.)
-  const playItem = (item: ReadItem) => {
-    const run = ++runCounter;
-    const isCurrent = () => run === runCounter;
-    if (httpBaseUrl === null) {
-      announceExhausted(item, "This environment is not connected right now.");
-      return;
-    }
-    void ttsSynthesize({ environmentId, input: { text: item.text } })
-      .then((result) => {
-        if (!isCurrent()) return;
-        if (result._tag !== "Success") {
-          announceExhausted(
-            item,
-            "The server could not synthesize this reply. Check the read-aloud settings on your Mac.",
-          );
-          return;
-        }
-        const clipUri = `${httpBaseUrl}${result.value.relativeUrl}`;
-        const clipPlayer = createAudioPlayer({ uri: clipUri });
-        player = clipPlayer;
-        let started = false;
-        // A start that never arrives is the only reliable failure signal on
-        // device; the watchdog turns it into a visible message.
-        const startWatchdog = setTimeout(() => {
-          if (started || !isCurrent()) return;
-          releasePlayer();
-          announceExhausted(item, "The reply clip did not start playing.");
-        }, START_WATCHDOG_MS);
-        playerSubscription = clipPlayer.addListener("playbackStatusUpdate", (status) => {
-          if (!isCurrent()) return;
-          if (status.playing && !started) {
-            started = true;
-            clearTimeout(startWatchdog);
-            setSpeech({
-              key: item.key,
-              phase: "playing",
-              source: item.source,
-              queued: readQueue.length,
-            });
-          }
-          if (status.didJustFinish) {
-            clearTimeout(startWatchdog);
-            releasePlayer();
-            if (item.source === "auto") playNextFromQueue();
-            else setSpeech(IDLE);
-          }
-        });
-        setSpeech({
-          key: item.key,
-          phase: "loading",
-          source: item.source,
-          queued: readQueue.length,
-        });
-        clipPlayer.play();
-      })
-      .catch(() => {
-        if (!isCurrent()) return;
-        announceExhausted(item, "The server could not be reached.");
-      });
-  };
-
+  // Fresh closure after every commit; the queue plays through it.
   useEffect(() => {
-    playThroughCurrentDeps = playItem;
-  }, [environmentId, httpBaseUrl, ttsSynthesize, playItem]);
+    playThroughCurrentDeps = (item: ReadItem) => {
+      const run = ++runCounter;
+      const isCurrent = () => run === runCounter;
+      if (httpBaseUrl === null) {
+        announceExhausted(item, "This environment is not connected right now.");
+        return;
+      }
+      const startPlayback = async () => {
+        // Voice input deactivates the audio session after recordings, and the
+        // silent switch would mute us: read-aloud is explicitly requested, so
+        // it overrides both (like a played video would).
+        try {
+          await setAudioModeAsync({
+            allowsRecording: false,
+            interruptionMode: "duckOthers",
+            playsInSilentMode: true,
+            shouldPlayInBackground: false,
+          });
+          await setIsAudioActiveAsync(true);
+        } catch {
+          // Still attempt playback; expo-audio often works regardless.
+        }
+        if (!isCurrent()) return;
+        try {
+          const result = await ttsSynthesize({
+            environmentId,
+            input: { text: item.text },
+          });
+          if (!isCurrent()) return;
+          if (result._tag !== "Success") {
+            announceExhausted(
+              item,
+              "The server could not synthesize this reply. Check the read-aloud settings on your Mac.",
+            );
+            return;
+          }
+          const clipUri = `${httpBaseUrl}${result.value.relativeUrl}`;
+          const clipPlayer = createAudioPlayer({ uri: clipUri });
+          player = clipPlayer;
+          let started = false;
+          // A start that never arrives is the only reliable failure signal on
+          // device; the watchdog turns it into a visible message.
+          const startWatchdog = setTimeout(() => {
+            if (started || !isCurrent()) return;
+            releasePlayer();
+            announceExhausted(item, "The reply clip did not start playing.");
+          }, START_WATCHDOG_MS);
+          playerSubscription = clipPlayer.addListener("playbackStatusUpdate", (status) => {
+            if (!isCurrent()) return;
+            if (status.playing && !started) {
+              started = true;
+              clearTimeout(startWatchdog);
+              setSpeech({
+                key: item.key,
+                phase: "playing",
+                source: item.source,
+                queued: readQueue.length,
+              });
+            }
+            if (status.didJustFinish) {
+              clearTimeout(startWatchdog);
+              releasePlayer();
+              if (item.source === "auto") playNextFromQueue();
+              else setSpeech(IDLE);
+            }
+          });
+          setSpeech({
+            key: item.key,
+            phase: "loading",
+            source: item.source,
+            queued: readQueue.length,
+          });
+          clipPlayer.play();
+        } catch {
+          if (isCurrent()) announceExhausted(item, "The server could not be reached.");
+        }
+      };
+      void startPlayback();
+    };
+  }, [environmentId, httpBaseUrl, ttsSynthesize]);
 
   return { speech, speak, stop, enqueue };
 }
