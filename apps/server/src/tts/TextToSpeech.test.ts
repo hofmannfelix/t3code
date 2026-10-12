@@ -21,7 +21,6 @@ interface RecordedRequest {
 
 const fakeSecretStore = (value: string | null) =>
   Layer.succeed(ServerSecretStore.ServerSecretStore, {
-    directory: undefined,
     get: () =>
       Effect.succeed(value === null ? Option.none() : Option.some(new TextEncoder().encode(value))),
     set: () => Effect.void,
@@ -35,6 +34,7 @@ const makeTestLayer = (input: {
   readonly tts?: Partial<TtsSettings>;
   readonly status?: number;
   readonly recorded?: Array<RecordedRequest>;
+  readonly responseBody?: string;
 }) =>
   TextToSpeech.layer.pipe(
     Layer.provide(
@@ -42,7 +42,15 @@ const makeTestLayer = (input: {
         NodeCrypto.layer,
         fakeSecretStore(input.storedKey ?? null),
         ServerSettings.layerTest({
-          tts: { apiKey: "", baseUrl: "", model: "", voice: "", ...input.tts },
+          tts: {
+            apiKey: "",
+            baseUrl: "",
+            model: "",
+            voice: "",
+            provider: "",
+            autoReadAloud: false,
+            ...input.tts,
+          },
         }),
         Layer.succeed(
           HttpClient.HttpClient,
@@ -55,12 +63,15 @@ const makeTestLayer = (input: {
                     ? new TextDecoder().decode(request.body.body)
                     : "",
               });
-              const body = input.status === undefined ? FAKE_AUDIO : new Uint8Array();
+              const body =
+                input.responseBody ?? (input.status === undefined ? FAKE_AUDIO : new Uint8Array());
               return HttpClientResponse.fromWeb(
                 request,
                 new Response(body, {
                   status: input.status ?? 200,
-                  headers: { "content-type": "audio/mpeg" },
+                  headers: {
+                    "content-type": input.responseBody ? "application/json" : "audio/mpeg",
+                  },
                 }),
               );
             }),
@@ -75,6 +86,8 @@ describe("TextToSpeech", () => {
     Effect.gen(function* () {
       const service = yield* TextToSpeech.TextToSpeech;
       const result = yield* Effect.result(service.synthesize({ text: "hello" }));
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag !== "Failure") return;
       assert.deepStrictEqual(result.failure.reason, "not-configured");
     }).pipe(Effect.provide(makeTestLayer({}))),
   );
@@ -83,6 +96,8 @@ describe("TextToSpeech", () => {
     Effect.gen(function* () {
       const service = yield* TextToSpeech.TextToSpeech;
       const result = yield* Effect.result(service.synthesize({ text: "hello" }));
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag !== "Failure") return;
       assert.deepStrictEqual(result.failure.reason, "not-configured");
     }).pipe(
       Effect.provide(
@@ -139,10 +154,66 @@ describe("TextToSpeech", () => {
     );
   });
 
+  it.effect("synthesizes with gemini and wraps the pcm answer in a wav container", () => {
+    const recorded: Array<RecordedRequest> = [];
+    // The RIFF/WAV header is 44 bytes; four fake PCM bytes ride behind it.
+    const pcm = new Uint8Array([1, 2, 3, 4]);
+    const responseBody = JSON.stringify({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                inlineData: {
+                  data: "AQIDBA==",
+                  mimeType: "audio/L16;codec=pcm;rate=24000",
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+    return Effect.gen(function* () {
+      const service = yield* TextToSpeech.TextToSpeech;
+      const result = yield* service.synthesize({ text: "hallo" });
+      assert.deepStrictEqual(recorded, [
+        {
+          url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent",
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: "hallo" }] }],
+            generationConfig: {
+              responseModalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
+              },
+            },
+          }),
+        },
+      ]);
+      const token = result.relativeUrl.slice("/api/tts-audio/".length);
+      const clip = Option.getOrThrow(yield* service.clip(token));
+      assert.strictEqual(clip.mimeType, "audio/wav");
+      assert.strictEqual(clip.bytes.length, 44 + pcm.length);
+      assert.deepStrictEqual(clip.bytes.slice(44), pcm);
+    }).pipe(
+      Effect.provide(
+        makeTestLayer({
+          storedKey: "sk-test",
+          tts: { provider: "gemini" },
+          recorded,
+          responseBody,
+        }),
+      ),
+    );
+  });
+
   it.effect("maps provider rejections to provider-failed", () =>
     Effect.gen(function* () {
       const service = yield* TextToSpeech.TextToSpeech;
       const result = yield* Effect.result(service.synthesize({ text: "hello" }));
+      assert.strictEqual(result._tag, "Failure");
+      if (result._tag !== "Failure") return;
       assert.deepStrictEqual(result.failure.reason, "provider-failed");
     }).pipe(Effect.provide(makeTestLayer({ storedKey: "sk-test", status: 401 }))),
   );

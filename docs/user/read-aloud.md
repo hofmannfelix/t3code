@@ -11,8 +11,11 @@ the queue, and switching threads silences the old conversation's backlog.
 
 By default your device's built-in voices do the reading. For natural-sounding
 voices, connect a text-to-speech provider in Settings → Integrations → Read
-aloud: any OpenAI-compatible speech endpoint works, which covers OpenAI, Groq,
-and self-hosted gateways. The API key is stored on the server, so every device
-connected to that server reads with the same voices. When the provider is
-unreachable, T3 Code falls back to the device voices for that message. If even
-those cannot play, a toast says so instead of staying silent.
+aloud. Two provider shapes are supported: **Google Gemini** (free tier
+available, top-tier quality, German included — pick the Gemini provider, add an
+AI Studio API key, and the defaults just work) and any **OpenAI-compatible**
+speech endpoint, which covers OpenAI, Groq, and self-hosted gateways. The API
+key is stored on the server, so every device connected to that server reads
+with the same voices. When the provider is unreachable, T3 Code falls back to
+the device voices for that message. If even those cannot play, a toast says so
+instead of staying silent.

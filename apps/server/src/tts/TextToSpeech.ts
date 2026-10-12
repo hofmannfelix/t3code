@@ -5,6 +5,7 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as NodeBuffer from "node:buffer";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
@@ -20,6 +21,15 @@ import * as ServerSettings from "../serverSettings.ts";
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MODEL = "tts-1";
 const DEFAULT_VOICE = "alloy";
+
+/**
+ * Gemini speaks through `generateContent` with AUDIO response modality and
+ * answers raw PCM that has to be wrapped in a WAV container for the clients'
+ * `<audio>` elements.
+ */
+const GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash-preview-tts";
+const GEMINI_DEFAULT_VOICE = "Kore";
 
 /** Clips are replayable until they expire, then dropped lazily on the next use. */
 const CLIP_TTL_MS = 10 * 60_000;
@@ -47,6 +57,25 @@ export class TextToSpeech extends Context.Service<
     readonly clip: (token: string) => Effect.Effect<Option.Option<TtsClip>>;
   }
 >()("t3/tts/TextToSpeech") {}
+
+/** Gemini answers 16-bit little-endian mono PCM; browsers need a RIFF header to play it. */
+const pcmToWav = (pcm: Uint8Array, sampleRate: number, channels = 1, bitsPerSample = 16) => {
+  const header = NodeBuffer.Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE((sampleRate * channels * bitsPerSample) / 8, 28);
+  header.writeUInt16LE((channels * bitsPerSample) / 8, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Uint8Array.from(NodeBuffer.Buffer.concat([header, pcm]));
+};
 
 const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -76,6 +105,79 @@ const make = Effect.gen(function* () {
     return inline.length > 0 && !isSecretRedacted(inline) ? inline : "";
   });
 
+  const synthesizeWithGemini = Effect.fn("TextToSpeech.synthesizeWithGemini")(function* (input: {
+    readonly text: string;
+    readonly baseUrl: string;
+    readonly model: string;
+    readonly voice: string;
+    readonly apiKey: string;
+  }) {
+    const request = yield* HttpClientRequest.post(
+      `${input.baseUrl.replace(/\/+$/, "")}/models/${input.model}:generateContent`,
+    ).pipe(
+      HttpClientRequest.setHeader("x-goog-api-key", input.apiKey),
+      HttpClientRequest.bodyJson({
+        contents: [{ parts: [{ text: input.text }] }],
+        generationConfig: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: input.voice } },
+          },
+        },
+      }),
+      Effect.mapError(
+        () =>
+          new TtsError({
+            reason: "provider-failed",
+            message: "The text-to-speech request could not be encoded.",
+          }),
+      ),
+    );
+    const response = yield* http.execute(request).pipe(
+      Effect.timeout("30 seconds"),
+      Effect.catch(() =>
+        Effect.fail(
+          new TtsError({
+            reason: "provider-failed",
+            message: "The text-to-speech provider could not be reached.",
+          }),
+        ),
+      ),
+    );
+    if (response.status !== 200) {
+      return yield* new TtsError({
+        reason: "provider-failed",
+        message: `The text-to-speech provider rejected the request with status ${response.status}.`,
+      });
+    }
+    const json = yield* response.json.pipe(
+      Effect.catch(() =>
+        Effect.fail(
+          new TtsError({
+            reason: "provider-failed",
+            message: "The text-to-speech provider returned an unreadable response.",
+          }),
+        ),
+      ),
+    );
+    const inlineData = (
+      json as {
+        candidates?: Array<{
+          content?: { parts?: Array<{ inlineData?: { data?: string; mimeType?: string } }> };
+        }>;
+      }
+    ).candidates?.[0]?.content?.parts?.[0]?.inlineData;
+    if (typeof inlineData?.data !== "string" || inlineData.data.length === 0) {
+      return yield* new TtsError({
+        reason: "provider-failed",
+        message: "The text-to-speech provider returned no audio.",
+      });
+    }
+    const pcm = new Uint8Array(NodeBuffer.Buffer.from(inlineData.data, "base64"));
+    const sampleRate = Number(/rate=(\d+)/.exec(inlineData.mimeType ?? "")?.[1] ?? 24_000);
+    return { bytes: pcmToWav(pcm, sampleRate), mimeType: "audio/wav" as const };
+  });
+
   const synthesize = Effect.fn("TextToSpeech.synthesize")(function* (input: {
     readonly text: string;
   }) {
@@ -94,6 +196,17 @@ const make = Effect.gen(function* () {
         reason: "not-configured",
         message: "No text-to-speech provider is configured in the server settings.",
       });
+    }
+    const provider = settings.tts.provider.trim();
+    if (provider === "gemini") {
+      const gemini = yield* synthesizeWithGemini({
+        text: input.text,
+        baseUrl: settings.tts.baseUrl.trim() || GEMINI_DEFAULT_BASE_URL,
+        model: settings.tts.model.trim() || GEMINI_DEFAULT_MODEL,
+        voice: settings.tts.voice.trim() || GEMINI_DEFAULT_VOICE,
+        apiKey,
+      });
+      return yield* storeClip({ bytes: gemini.bytes, mimeType: gemini.mimeType });
     }
     const baseUrl = settings.tts.baseUrl.trim() || DEFAULT_BASE_URL;
     const model = settings.tts.model.trim() || DEFAULT_MODEL;
@@ -145,6 +258,13 @@ const make = Effect.gen(function* () {
       ),
     );
 
+    return yield* storeClip({ bytes, mimeType: "audio/mpeg" });
+  });
+
+  const storeClip = Effect.fn("TextToSpeech.storeClip")(function* (input: {
+    readonly bytes: Uint8Array;
+    readonly mimeType: string;
+  }) {
     const token = yield* crypto.randomUUIDv4.pipe(
       Effect.mapError(
         () =>
@@ -162,7 +282,7 @@ const make = Effect.gen(function* () {
       clips.delete(oldest.value);
     }
     const expiresAt = now + CLIP_TTL_MS;
-    clips.set(token, { bytes, mimeType: "audio/mpeg", expiresAt });
+    clips.set(token, { bytes: input.bytes, mimeType: input.mimeType, expiresAt });
     return { relativeUrl: `/api/tts-audio/${token}`, expiresAt };
   });
 
