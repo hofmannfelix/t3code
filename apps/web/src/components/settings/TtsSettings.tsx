@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { serverEnvironment } from "../../state/server";
@@ -50,9 +50,26 @@ export function TtsSettings({
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     label: "save read-aloud settings",
   });
-  const [drafts, setDrafts] = useState({ baseUrl: "", model: "", voice: "", apiKey: "" });
+  const [drafts, setDrafts] = useState({
+    baseUrl: tts.baseUrl,
+    model: tts.model,
+    voice: tts.voice,
+    apiKey: "",
+  });
   const [saving, setSaving] = useState(false);
   const isKeySaved = tts.apiKey.length > 0;
+
+  // Gespeicherte Werte sichtbar machen, wenn sich serverseitig etwas ändert
+  // (z. B. nach dem Speichern oder beim Environment-Wechsel). Getippte,
+  // noch nicht gespeicherte Änderungen bleiben stehen.
+  useEffect(() => {
+    setDrafts((current) => ({
+      ...current,
+      baseUrl: current.baseUrl || tts.baseUrl,
+      model: current.model || tts.model,
+      voice: current.voice || tts.voice,
+    }));
+  }, [tts.baseUrl, tts.model, tts.voice]);
 
   const save = async () => {
     setSaving(true);
