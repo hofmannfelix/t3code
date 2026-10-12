@@ -11,9 +11,12 @@ import { toastManager } from "~/components/ui/toast";
 export type SpeechMode = "cloud" | "browser";
 export type SpeechSource = "manual" | "auto";
 
+export type SpeechPhase = "loading" | "playing";
+
 export interface SpeechState {
   /** Identity of the message currently spoken, `null` when idle. */
   readonly key: string | null;
+  readonly phase: SpeechPhase | null;
   readonly mode: SpeechMode | null;
   readonly source: SpeechSource | null;
   /** Fraction of the clip played, cloud playback only. */
@@ -24,6 +27,7 @@ export interface SpeechState {
 
 const IDLE: SpeechState = {
   key: null,
+  phase: null,
   mode: null,
   source: null,
   progress: null,
@@ -96,7 +100,7 @@ const playNextFromQueue = () => {
   // The player registers after the first commit; queued items wait for it.
   if (playThroughCurrentDeps === null) return;
   const next = readQueue.shift();
-  setSpeech({ ...IDLE, queued: readQueue.length });
+  setSpeech({ ...IDLE, queued: readQueue.length, phase: "loading", key: next?.key ?? null });
   if (next) playThroughCurrentDeps?.({ key: next.key, text: next.text, source: next.source });
 };
 
@@ -207,6 +211,14 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
         utterance.addEventListener("start", () => {
           started = true;
           clearTimeout(startWatchdog);
+          setSpeech({
+            key: item.key,
+            phase: "playing",
+            mode: "browser",
+            source: item.source,
+            progress: null,
+            queued: readQueue.length,
+          });
         });
         utterance.addEventListener("end", () => {
           clearTimeout(startWatchdog);
@@ -221,6 +233,7 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
         });
         setSpeech({
           key: item.key,
+          phase: "loading",
           mode: "browser",
           source: item.source,
           progress: null,
@@ -257,10 +270,22 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
           clip.removeEventListener("error", onClipError);
           speakWithBrowser();
         };
+        clip.addEventListener("playing", () => {
+          if (!isCurrent()) return;
+          setSpeech({
+            key: item.key,
+            phase: "playing",
+            mode: "cloud",
+            source: item.source,
+            progress: Math.min(1, clip.currentTime / clip.duration),
+            queued: readQueue.length,
+          });
+        });
         clip.addEventListener("timeupdate", () => {
           if (isCurrent() && clip.duration > 0) {
             setSpeech({
               key: item.key,
+              phase: "playing",
               mode: "cloud",
               source: item.source,
               progress: Math.min(1, clip.currentTime / clip.duration),
@@ -277,6 +302,7 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
         audio = clip;
         setSpeech({
           key: item.key,
+          phase: "loading",
           mode: "cloud",
           source: item.source,
           progress: 0,

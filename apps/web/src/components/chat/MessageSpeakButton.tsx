@@ -1,5 +1,7 @@
 import { memo, useEffect, useRef } from "react";
 import { Square, Volume2 } from "lucide";
+
+import { Spinner } from "../ui/spinner";
 import type { EnvironmentId } from "@t3tools/contracts";
 
 import { useSpokenMessage } from "~/hooks/useSpokenMessage";
@@ -26,6 +28,7 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
 }) {
   const { speech, speak, stop } = useSpokenMessage(environmentId);
   const isSpeakingThis = speech.key === messageKey;
+  const isLoadingThis = isSpeakingThis && speech.phase === "loading";
   const speechRef = useRef(speech);
   // Latest-ref pattern: the unmount cleanup below must see the newest state,
   // but reading it during render would tear the subscription.
@@ -56,13 +59,23 @@ export const MessageSpeakButton = memo(function MessageSpeakButton({
             />
           }
         >
-          <MorphIcon
-            className={cn("size-3", isSpeakingThis && "text-primary")}
-            icon={isSpeakingThis ? Square : Volume2}
-          />
+          {isLoadingThis ? (
+            <Spinner className="size-3" />
+          ) : (
+            <MorphIcon
+              className={cn("size-3", isSpeakingThis && "text-primary")}
+              icon={isSpeakingThis ? Square : Volume2}
+            />
+          )}
         </TooltipTrigger>
         <TooltipPopup>
-          <p>{isSpeakingThis ? "Stop reading aloud" : "Read aloud"}</p>
+          <p>
+            {isLoadingThis
+              ? "Synthesizing read aloud"
+              : isSpeakingThis
+                ? "Stop reading aloud"
+                : "Read aloud"}
+          </p>
         </TooltipPopup>
       </Tooltip>
       {isSpeakingThis && speech.progress !== null ? (

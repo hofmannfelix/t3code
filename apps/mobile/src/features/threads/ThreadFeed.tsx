@@ -400,18 +400,23 @@ function ReadAloudButton(props: {
 }) {
   const { speech, speak, stop } = useReadAloud(props.environmentId);
   const isSpeakingThis = speech.key === props.messageKey;
+  const isLoadingThis = isSpeakingThis && speech.phase === "loading";
 
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={isSpeakingThis ? "Stop reading aloud" : "Read aloud"}
+      accessibilityLabel={
+        isLoadingThis ? "Loading read aloud" : isSpeakingThis ? "Stop reading aloud" : "Read aloud"
+      }
       onPress={() => {
         if (isSpeakingThis) stop();
         else speak({ key: props.messageKey, text: props.text });
       }}
       className="h-7 w-7 items-center justify-center"
     >
-      {isSpeakingThis ? (
+      {isLoadingThis ? (
+        <ActivityIndicator size="small" />
+      ) : isSpeakingThis ? (
         <SymbolView name="stop.fill" size={13} tintColor={props.iconColor} type="monochrome" />
       ) : (
         <SymbolView name="speaker.wave.2" size={13} tintColor={props.iconColor} type="monochrome" />

@@ -10,6 +10,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 
 export interface ReadAloudSpeech {
   readonly key: string | null;
+  readonly phase: "loading" | "playing" | null;
   readonly source: "manual" | "auto" | null;
   readonly queued: number;
 }
@@ -30,7 +31,7 @@ interface ThreadFeedMessageEntry {
   };
 }
 
-const IDLE: ReadAloudSpeech = { key: null, source: null, queued: 0 };
+const IDLE: ReadAloudSpeech = { key: null, phase: null, source: null, queued: 0 };
 const START_WATCHDOG_MS = 5_000;
 
 type Listener = () => void;
@@ -87,7 +88,7 @@ const stopCurrent = () => {
 const playNextFromQueue = () => {
   if (playThroughCurrentDeps === null) return;
   const next = readQueue.shift();
-  setSpeech({ ...IDLE, queued: readQueue.length });
+  setSpeech({ ...IDLE, queued: readQueue.length, phase: "loading", key: next?.key ?? null });
   if (next) playThroughCurrentDeps({ key: next.key, text: next.text, source: next.source });
 };
 
@@ -199,6 +200,12 @@ export function useReadAloud(environmentId: EnvironmentId) {
           if (status.playing && !started) {
             started = true;
             clearTimeout(startWatchdog);
+            setSpeech({
+              key: item.key,
+              phase: "playing",
+              source: item.source,
+              queued: readQueue.length,
+            });
           }
           if (status.didJustFinish) {
             clearTimeout(startWatchdog);
@@ -209,6 +216,7 @@ export function useReadAloud(environmentId: EnvironmentId) {
         });
         setSpeech({
           key: item.key,
+          phase: "loading",
           source: item.source,
           queued: readQueue.length,
         });
