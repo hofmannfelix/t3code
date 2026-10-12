@@ -37,8 +37,21 @@ type Listener = () => void;
 
 const listeners = new Set<Listener>();
 
+/**
+ * Lead chunk (first sentence) for fast first audio, then the next two
+ * sentences, then the rest in one request: at most three provider calls, and
+ * chunks 1+2 cover ~12s of playback while the rest is still synthesizing.
+ */
+const chunkReply = (text: string): string[] => {
+  const sentences = text.match(/[^.!?…]+[.!?…]+["'»)]*\s*|[^.!?…]+$/g) ?? [text];
+  if (sentences.length <= 3) return [text];
+  return [sentences[0], sentences.slice(1, 3).join(""), sentences.slice(3).join("")].filter(
+    (chunk) => chunk.trim().length > 0,
+  );
+};
+
 let currentSpeech: ReadAloudSpeech = IDLE;
-let readQueue: Array<ReadItem> = [];
+let readQueue: Array<ReadItem & { readonly dedupeKey: string }> = [];
 let player: AudioPlayer | null = null;
 let playerSubscription: { remove: () => void } | null = null;
 let runCounter = 0;
@@ -69,7 +82,7 @@ const playNextFromQueue = () => {
   if (playThroughCurrentDeps === null) return;
   const next = readQueue.shift();
   setSpeech({ ...IDLE, queued: readQueue.length });
-  if (next) playThroughCurrentDeps(next);
+  if (next) playThroughCurrentDeps({ key: next.key, text: next.text, source: next.source });
 };
 
 const announceExhausted = (item: ReadItem, message: string) => {
@@ -111,16 +124,36 @@ export function useReadAloud(environmentId: EnvironmentId) {
 
   const speak = useCallback((item: { readonly key: string; readonly text: string }) => {
     stopCurrent();
-    playThroughCurrentDeps?.({ ...item, source: "manual" as const });
+    const chunks = chunkReply(item.text);
+    const lead = chunks[0];
+    if (lead === undefined) return;
+    playThroughCurrentDeps?.({ key: item.key, text: lead, source: "manual" as const });
+    for (let index = 1; index < chunks.length; index++) {
+      const text = chunks[index];
+      if (text === undefined) continue;
+      readQueue.push({
+        key: item.key,
+        dedupeKey: `${item.key}#${index}`,
+        text,
+        source: "auto" as const,
+      });
+    }
+    if (currentSpeech.key === null) playNextFromQueue();
   }, []);
 
   const stop = useCallback(() => {
     stopCurrent();
   }, []);
 
+  let enqueueCounter = 0;
   const enqueue = useCallback((item: { readonly key: string; readonly text: string }) => {
-    if (readQueue.some((queued) => queued.key === item.key)) return;
-    readQueue.push({ ...item, source: "auto" as const });
+    enqueueCounter += 1;
+    readQueue.push({
+      key: item.key,
+      dedupeKey: `${item.key}#${enqueueCounter}`,
+      text: item.text,
+      source: "auto" as const,
+    });
     if (currentSpeech.key === null) playNextFromQueue();
   }, []);
 

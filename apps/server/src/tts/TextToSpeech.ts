@@ -112,6 +112,12 @@ const make = Effect.gen(function* () {
     readonly voice: string;
     readonly apiKey: string;
   }) {
+    // Gemini 3.x TTS models take the voice directly and answer complete WAV;
+    // 2.5-era models want prebuiltVoiceConfig.voiceName and answer raw PCM.
+    const isGemini3 = /gemini-3/.test(input.model);
+    const speechConfig = isGemini3
+      ? { voiceConfig: { voice: input.voice } }
+      : { voiceConfig: { prebuiltVoiceConfig: { voiceName: input.voice } } };
     const request = yield* HttpClientRequest.post(
       `${input.baseUrl.replace(/\/+$/, "")}/models/${input.model}:generateContent`,
     ).pipe(
@@ -120,9 +126,7 @@ const make = Effect.gen(function* () {
         contents: [{ parts: [{ text: input.text }] }],
         generationConfig: {
           responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: input.voice } },
-          },
+          speechConfig,
         },
       }),
       Effect.mapError(
@@ -173,9 +177,13 @@ const make = Effect.gen(function* () {
         message: "The text-to-speech provider returned no audio.",
       });
     }
-    const pcm = new Uint8Array(NodeBuffer.Buffer.from(inlineData.data, "base64"));
+    const bytes = new Uint8Array(NodeBuffer.Buffer.from(inlineData.data, "base64"));
+    // 3.x answers complete WAV; 2.5-era answers headerless PCM that needs the container.
+    if ((inlineData.mimeType ?? "").includes("wav")) {
+      return { bytes, mimeType: "audio/wav" as const };
+    }
     const sampleRate = Number(/rate=(\d+)/.exec(inlineData.mimeType ?? "")?.[1] ?? 24_000);
-    return { bytes: pcmToWav(pcm, sampleRate), mimeType: "audio/wav" as const };
+    return { bytes: pcmToWav(bytes, sampleRate), mimeType: "audio/wav" as const };
   });
 
   const synthesize = Effect.fn("TextToSpeech.synthesize")(function* (input: {

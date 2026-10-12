@@ -39,13 +39,27 @@ interface ReadItem {
 }
 
 /** Set by the hook on every render; the module-level queue plays through it. */
+let enqueueCounter = 0;
 let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
 
 const listeners = new Set<Listener>();
 
+/**
+ * Lead chunk (first sentence) for fast first audio, then the next two
+ * sentences, then the rest in one request: at most three provider calls, and
+ * chunks 1+2 cover ~12s of playback while the rest is still synthesizing.
+ */
+const chunkReply = (text: string): string[] => {
+  const sentences = text.match(/[^.!?…]+[.!?…]+["'»)]*\s*|[^.!?…]+$/g) ?? [text];
+  if (sentences.length <= 3) return [text];
+  return [sentences[0], sentences.slice(1, 3).join(""), sentences.slice(3).join("")].filter(
+    (chunk) => chunk.trim().length > 0,
+  );
+};
+
 let currentSpeech: SpeechState = IDLE;
 let audio: HTMLAudioElement | null = null;
-let readQueue: Array<ReadItem> = [];
+let readQueue: Array<{ key: string; dedupeKey: string; text: string; source: SpeechSource }> = [];
 let runCounter = 0;
 /** Unix ms of the last "nothing could play" toast; a failure cascade stays quiet. */
 let lastFailureToastAt = 0;
@@ -77,7 +91,7 @@ const playNextFromQueue = () => {
   if (playThroughCurrentDeps === null) return;
   const next = readQueue.shift();
   setSpeech({ ...IDLE, queued: readQueue.length });
-  if (next) playThroughCurrentDeps(next);
+  if (next) playThroughCurrentDeps?.({ key: next.key, text: next.text, source: next.source });
 };
 
 /**
@@ -107,7 +121,22 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
 
   const speak = useCallback((input: { readonly key: string; readonly text: string }) => {
     stopCurrent();
-    playThroughCurrentDeps?.({ ...input, source: "manual" as const });
+    const chunks = chunkReply(input.text);
+    const lead = chunks[0];
+    if (lead === undefined) return;
+    playThroughCurrentDeps?.({ key: input.key, text: lead, source: "manual" as const });
+    // The rest of the reply queues up so playback never waits on synthesis.
+    for (let index = 1; index < chunks.length; index++) {
+      const text = chunks[index];
+      if (text === undefined) continue;
+      readQueue.push({
+        key: input.key,
+        dedupeKey: `${input.key}#${index}`,
+        text,
+        source: "auto" as const,
+      });
+    }
+    if (currentSpeech.key === null) playNextFromQueue();
   }, []);
 
   const stop = useCallback(() => {
@@ -115,9 +144,13 @@ export function useSpokenMessage(environmentId: EnvironmentId) {
   }, []);
 
   const enqueue = useCallback((item: { readonly key: string; readonly text: string }) => {
-    // Deduplicate: streaming reruns offer the same message repeatedly.
-    if (readQueue.some((queued) => queued.key === item.key)) return;
-    readQueue.push({ ...item, source: "auto" as const });
+    enqueueCounter += 1;
+    readQueue.push({
+      key: item.key,
+      dedupeKey: `${item.key}#${enqueueCounter}`,
+      text: item.text,
+      source: "auto" as const,
+    });
     if (currentSpeech.key === null) playNextFromQueue();
   }, []);
 
