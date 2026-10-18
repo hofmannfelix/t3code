@@ -449,8 +449,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     () => composerStripAttachments(props.draftAttachments),
     [props.draftAttachments],
   );
-  // Stopping the agent is not what the send button means in edit mode.
-  const showStopAction = !hasContent && props.canStopThread && queuedEdit === null;
+  // Stopping the agent is available whenever a turn is stoppable and not in queued-edit mode.
+  const canStopAgent = props.canStopThread && queuedEdit === null;
 
   const uploadStates = useAtomValue(composerAttachmentUploadsAtom);
   const attachmentsUploading =
@@ -1138,14 +1138,14 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
               </View>
             ) : null}
             {!isExpanded ? (
-              <View className="flex-row items-center">
+              <View className="flex-row items-center gap-1">
                 <ComposerDictationStartAction
                   state={voiceInput.state}
                   isAvailable={voiceInput.isAvailable}
                   onStart={voiceInput.start}
                   onCancel={voiceInput.cancel}
                 />
-                {showStopAction ? (
+                {canStopAgent ? (
                   <ComposerActionButton
                     accessibilityLabel="Stop agent"
                     icon="stop.fill"
@@ -1153,21 +1153,18 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                     disabled={!props.canOperateThread}
                     onPress={props.onStopThread}
                   />
-                ) : (
-                  <View className="flex-row items-center gap-1">
-                    <SendAndReadAloudActionButton
-                      disabled={!canSend}
-                      presentation={sendPresentation}
-                      onSend={handleSendAndReadAloud}
-                    />
-                    <SendActionButton
-                      accessibilityLabel={sendBlockedReason ?? sendLabel}
-                      presentation={sendPresentation}
-                      disabled={!canSend}
-                      onSend={handleSend}
-                    />
-                  </View>
-                )}
+                ) : null}
+                <SendAndReadAloudActionButton
+                  disabled={!canSend}
+                  presentation={sendPresentation}
+                  onSend={handleSendAndReadAloud}
+                />
+                <SendActionButton
+                  accessibilityLabel={sendBlockedReason ?? sendLabel}
+                  presentation={sendPresentation}
+                  disabled={!canSend}
+                  onSend={handleSend}
+                />
               </View>
             ) : null}
             {isExpanded ? <View className="h-1" /> : null}
@@ -1238,7 +1235,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                     </View>
                   </View>
                 )}
-                <View className="shrink-0 flex-row items-center">
+                <View className="shrink-0 flex-row items-center gap-1">
                   <ComposerDictationPrimaryAction
                     state={voiceInput.state}
                     presentation={voicePresentation}
@@ -1247,7 +1244,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                     onConfirm={voiceInput.stop}
                     onCancel={voiceInput.cancel}
                   />
-                  {showStopAction ? (
+                  {canStopAgent ? (
                     <ComposerActionButton
                       accessibilityLabel="Stop agent"
                       icon="stop.fill"
@@ -1255,7 +1252,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                       disabled={!props.canOperateThread}
                       onPress={props.onStopThread}
                     />
-                  ) : voicePresentation.showsSend ? (
+                  ) : null}
+                  {voicePresentation.showsSend ? (
                     voiceInput.state.phase === "recording" ? (
                       <View className="flex-row items-center gap-1">
                         <SendAndReadAloudActionButton

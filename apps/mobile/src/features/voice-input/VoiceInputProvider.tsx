@@ -7,6 +7,7 @@ import {
   type RecorderState,
   type RecordingStatus,
 } from "expo-audio";
+import { requireOptionalNativeModule } from "expo";
 import { File } from "expo-file-system";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import {
@@ -51,8 +52,23 @@ const VOICE_RECORDING_OPTIONS = {
   ...(Platform.OS === "ios" ? IOS_RECORDING_OPTIONS : ANDROID_RECORDING_OPTIONS),
 };
 
+const T3NativeControls =
+  Platform.OS === "ios"
+    ? (requireOptionalNativeModule("T3NativeControls") as {
+        enforceBuiltInMicrophone?: () => Promise<boolean>;
+        resetPreferredAudioInput?: () => Promise<boolean>;
+      } | null)
+    : null;
+
 async function releaseVoiceRecordingAudio(): Promise<void> {
   try {
+    if (Platform.OS === "ios") {
+      try {
+        await T3NativeControls?.resetPreferredAudioInput?.();
+      } catch {
+        // Ignore reset failures
+      }
+    }
     await setAudioModeAsync({ allowsRecording: false });
   } finally {
     // Expo does not deactivate AVAudioSession when recording stops or its
@@ -70,6 +86,13 @@ async function configureVoiceRecordingAudio(): Promise<void> {
       shouldPlayInBackground: false,
     });
     await setIsAudioActiveAsync(true);
+    if (Platform.OS === "ios") {
+      try {
+        await T3NativeControls?.enforceBuiltInMicrophone?.();
+      } catch {
+        // Continue if setting preferred input fails
+      }
+    }
   } catch (error) {
     try {
       await releaseVoiceRecordingAudio();
@@ -95,7 +118,9 @@ export function useGlobalVoiceInput() {
 
 function useVoiceInputRuntime() {
   const preferencesResult = useAtomValue(mobilePreferencesAtom);
-  const preferences = AsyncResult.isSuccess(preferencesResult) ? preferencesResult.value : undefined;
+  const preferences = AsyncResult.isSuccess(preferencesResult)
+    ? preferencesResult.value
+    : undefined;
   const preferencesRef = useRef(preferences);
   preferencesRef.current = preferences;
   const [{ state, ownerKey, label }, setState] = useState({

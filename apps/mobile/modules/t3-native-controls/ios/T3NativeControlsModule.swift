@@ -183,6 +183,33 @@ public final class T3NativeControlsModule: Module {
       }
     }
 
+    AsyncFunction("enforceBuiltInMicrophone") { (promise: Promise) in
+      let session = AVAudioSession.sharedInstance()
+      guard let inputs = session.availableInputs else {
+        promise.resolve(false)
+        return
+      }
+      if let builtInMic = inputs.first(where: { $0.portType == .builtInMic }) {
+        do {
+          try session.setPreferredInput(builtInMic)
+          promise.resolve(true)
+        } catch {
+          promise.resolve(false)
+        }
+      } else {
+        promise.resolve(false)
+      }
+    }
+
+    AsyncFunction("resetPreferredAudioInput") { (promise: Promise) in
+      do {
+        try AVAudioSession.sharedInstance().setPreferredInput(nil)
+        promise.resolve(true)
+      } catch {
+        promise.resolve(false)
+      }
+    }
+
     Function("isSpeaking") { () -> Bool in
       return T3NativeSpeechSynthesizer.shared.isSpeaking()
     }
