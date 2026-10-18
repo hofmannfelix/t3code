@@ -814,6 +814,8 @@ export const stopAllSpeech = () => stopCurrent();
 const stopCurrent = () => {
   runCounter += 1;
   isUserPausedState = false;
+  isVoiceRecordingActive = false;
+  pausedByVoiceInput = null;
   activeStreamAbort?.abort();
   activeStreamAbort = null;
   answerBlockQueue = [];
@@ -839,6 +841,8 @@ const announceExhausted = (message: string) => {
   answerBlockQueue = [];
   currentAnswerBlock = null;
   currentBlockChunks = [];
+  isVoiceRecordingActive = false;
+  pausedByVoiceInput = null;
   cleanupActiveSegments();
   releasePlaylist();
   setSpeech(IDLE);
@@ -848,6 +852,10 @@ const announceExhausted = (message: string) => {
  * Ensures iOS audio session is active and configured for playback without ducking.
  */
 const ensureAudioSession = async () => {
+  if (isVoiceRecordingActive) {
+    log("ensureAudioSession: suppressed because voice recording is active");
+    return;
+  }
   try {
     await setAudioModeAsync({
       allowsRecording: false,
@@ -921,9 +929,13 @@ let playlistSubscription: { remove: () => void } | null = null;
 let activeStreamAbort: AbortController | null = null;
 const activeSegmentUris = new Set<string>();
 
-let pausedByVoiceInput: "speech" | "waiting" | null = null;
+let isVoiceRecordingActive = false;
+let pausedByVoiceInput: "speech" | "waiting" | "idle" | null = null;
+
+export const getIsVoiceRecordingActive = () => isVoiceRecordingActive;
 
 export const pauseAudioForVoiceRecording = () => {
+  isVoiceRecordingActive = true;
   if (currentSpeech.phase === "playing" || currentSpeech.phase === "loading") {
     pausedByVoiceInput = "speech";
     if (playlist) {
@@ -951,14 +963,15 @@ export const pauseAudioForVoiceRecording = () => {
         void T3NativeControls.pauseWaitingAudio();
       } catch {}
     }
+  } else {
+    pausedByVoiceInput = "idle";
   }
 };
 
 export const resumeAudioAfterVoiceRecording = async () => {
   const previousState = pausedByVoiceInput;
   pausedByVoiceInput = null;
-
-  if (!previousState) return;
+  isVoiceRecordingActive = false;
 
   await ensureAudioSession();
 
@@ -979,7 +992,21 @@ export const resumeAudioAfterVoiceRecording = async () => {
         return;
       } catch {}
     }
-  } else if (previousState === "waiting") {
+    if (currentAnswerBlock) {
+      startAnswerBlock(currentAnswerBlock);
+      return;
+    }
+  }
+
+  // If no speech was playing (or speech couldn't resume), but answer blocks were queued:
+  if (currentAnswerBlock === null && answerBlockQueue.length > 0) {
+    const nextBlock = answerBlockQueue.shift()!;
+    log("resumeAudioAfterVoiceRecording: starting queued answer block", nextBlock.key);
+    startAnswerBlock(nextBlock);
+    return;
+  }
+
+  if (previousState === "waiting" || (isAudioSessionActive && !isUserPausedState)) {
     if (isAudioSessionActive && !isUserPausedState) {
       if (T3NativeControls?.resumeWaitingAudio) {
         try {
@@ -999,6 +1026,15 @@ let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
 let activeStartAnswerBlock: ((item: ReadItem, isCurrent: () => boolean) => void) | null = null;
 
 const startAnswerBlock = (item: ReadItem) => {
+  if (isVoiceRecordingActive) {
+    log("startAnswerBlock: held because voice recording is active", item.key);
+    answerBlockQueue.unshift(item);
+    setSpeech({
+      ...currentSpeech,
+      queued: answerBlockQueue.length,
+    });
+    return;
+  }
   log("startAnswerBlock:", item.key, "source:", item.source);
   currentAnswerBlock = item;
   currentBlockChunks = [];
@@ -1125,12 +1161,24 @@ const enqueueAnswerBlock = (
   };
 
   if (options?.forceImmediate) {
+    if (isVoiceRecordingActive) {
+      log(
+        "enqueueAnswerBlock: forceImmediate held because voice recording is active",
+        blockItem.key,
+      );
+      answerBlockQueue.unshift(blockItem);
+      setSpeech({
+        ...currentSpeech,
+        queued: answerBlockQueue.length,
+      });
+      return;
+    }
     stopCurrent();
     startAnswerBlock(blockItem);
     return;
   }
 
-  if (currentAnswerBlock === null && currentSpeech.phase === null) {
+  if (currentAnswerBlock === null && currentSpeech.phase === null && !isVoiceRecordingActive) {
     startAnswerBlock(blockItem);
   } else {
     answerBlockQueue.push(blockItem);
@@ -1222,6 +1270,17 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
   const speakWithNativeFallback = useCallback(
     async (itemToSpeak: ReadItem, isCurrent: () => boolean) => {
       if (Platform.OS === "ios" && T3NativeControls?.speakText) {
+        if (isVoiceRecordingActive) {
+          log(
+            "speakWithNativeFallback: voice recording active, cannot speak with native synthesizer",
+          );
+          answerBlockQueue.unshift(itemToSpeak);
+          setSpeech({
+            ...currentSpeech,
+            queued: answerBlockQueue.length,
+          });
+          return true;
+        }
         try {
           await ensureAudioSession();
           if (!isCurrent()) return true;
@@ -1406,10 +1465,30 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
                 queued: answerBlockQueue.length,
               });
 
-              pl.play();
+              if (isVoiceRecordingActive) {
+                log("consumeDeviceStream: voice recording active, holding stream segment");
+                setSpeech({
+                  key: item.key,
+                  threadId: item.threadId ?? currentSpeech.threadId,
+                  environmentId: item.environmentId ?? currentSpeech.environmentId,
+                  title: item.title ?? currentSpeech.title,
+                  projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
+                  phase: "paused",
+                  source: item.source,
+                  queued: answerBlockQueue.length,
+                });
+                pausedByVoiceInput = "speech";
+              } else {
+                pl.play();
+              }
             } else {
               playlist.add({ uri: segmentUri });
-              if (!playlist.playing && !isUserPaused && !isUserPausedState) {
+              if (
+                !playlist.playing &&
+                !isUserPaused &&
+                !isUserPausedState &&
+                !isVoiceRecordingActive
+              ) {
                 playlist.play();
               }
             }
@@ -1537,7 +1616,24 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
 
         playlistSubscription = clipPlaylist.addListener("playlistStatusUpdate", (status) => {
           if (!isCurrent()) return;
-          if (!started && status.isLoaded) clipPlaylist.play();
+          if (!started && status.isLoaded) {
+            if (isVoiceRecordingActive) {
+              log("playClip: voice recording active, holding loaded clip");
+              setSpeech({
+                key: chunkItem.key,
+                threadId: chunkItem.threadId ?? currentSpeech.threadId,
+                environmentId: chunkItem.environmentId ?? currentSpeech.environmentId,
+                title: chunkItem.title ?? currentSpeech.title,
+                projectTitle: chunkItem.projectTitle ?? currentSpeech.projectTitle,
+                phase: "paused",
+                source: chunkItem.source,
+                queued: answerBlockQueue.length,
+              });
+              pausedByVoiceInput = "speech";
+            } else {
+              clipPlaylist.play();
+            }
+          }
           if (status.playing && !started) {
             started = true;
             clearTimeout(startWatchdog);

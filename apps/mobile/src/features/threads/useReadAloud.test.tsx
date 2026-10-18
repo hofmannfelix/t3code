@@ -1022,6 +1022,69 @@ describe("useReadAloudAutoAnnounce", () => {
     await flush();
   });
 
+  it("holds incoming replies in FIFO queue while voice recording is active and starts playing only after recording finishes", async () => {
+    const view = renderReadAloud();
+
+    // Voice recording starts before any message arrives
+    act(() => {
+      pauseAudioForVoiceRecording();
+    });
+
+    // Assistant message arrives while recording
+    act(() => {
+      view.enqueue()({
+        key: "reply-during-recording-1",
+        threadId: "thread-voice-1",
+        text: "This message arrived while the user was speaking.",
+      });
+    });
+
+    // Verify nothing started playing and no audio player was created
+    expect(harness.players.length).toBe(0);
+    expect(view.speech().phase).toBe(null);
+    expect(view.speech().queued).toBe(1);
+
+    // Another assistant message arrives while recording
+    act(() => {
+      view.enqueue()({
+        key: "reply-during-recording-2",
+        threadId: "thread-voice-2",
+        text: "Second message arrived while recording.",
+      });
+    });
+    expect(harness.players.length).toBe(0);
+    expect(view.speech().queued).toBe(2);
+
+    // Voice recording finishes
+    await act(async () => {
+      await resumeAudioAfterVoiceRecording();
+    });
+    await flush();
+
+    // First queued message has now started playing
+    expect(harness.players.length).toBe(1);
+    expect(view.speech().key).toBe("reply-during-recording-1");
+    expect(view.speech().queued).toBe(1);
+
+    // First message finishes
+    const pl1 = harness.players[0]!;
+    act(() => {
+      pl1.emit({ didJustFinish: true });
+    });
+    await flush();
+
+    // Second queued message starts playing
+    expect(harness.players.length).toBe(2);
+    expect(view.speech().key).toBe("reply-during-recording-2");
+    expect(view.speech().queued).toBe(0);
+
+    // Cleanup
+    act(() => {
+      view.stop()();
+    });
+    await flush();
+  });
+
   it("persists global audio session state across speech completion until explicitly stopped", async () => {
     let sessionActive = false;
     function ActiveComponent() {
