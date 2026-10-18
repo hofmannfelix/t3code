@@ -64,6 +64,7 @@ export function useVoiceInputController(input: {
   }, [session]);
   const state = global.ownerKey === input.ownerKey ? global.state : IDLE_STATE;
   const isBusy = voiceInputBlocksSubmission(state);
+  const hasRetryableRecording = global.ownerKey === input.ownerKey && global.hasRetryableRecording;
   return {
     isAvailable: global.isAvailable && (!global.isBusy || global.ownerKey === input.ownerKey),
     state,
@@ -72,8 +73,10 @@ export function useVoiceInputController(input: {
     isBusy,
     freezesEditor: isBusy,
     blocksSubmission: isBusy,
+    hasRetryableRecording,
     start,
     stop: global.stop,
     cancel: global.cancel,
+    retry: global.retry,
   };
 }

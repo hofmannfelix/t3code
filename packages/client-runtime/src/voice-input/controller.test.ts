@@ -672,4 +672,59 @@ describe("VoiceInputController", () => {
     expect(harness.recorder.record).not.toHaveBeenCalled();
     expect(harness.controller.currentState.error).toContain("background");
   });
+
+  it("preserves recording file on transcription error and retries successfully", async () => {
+    let failFirst = true;
+    const harness = createHarness({
+      getTranscriber: () => ({
+        prepare: async () =>
+          preparedTranscription(async () => {
+            if (failFirst) {
+              failFirst = false;
+              throw new VoiceTranscriptionError(
+                "transcription-failed",
+                "Transcription request timed out",
+              );
+            }
+            return "retried text";
+          }),
+      }),
+    });
+    await harness.controller.start();
+    await harness.controller.stop();
+
+    expect(harness.controller.currentState.phase).toBe("error");
+    expect(harness.controller.currentState.error).toBe("Transcription request timed out");
+    expect(harness.controller.hasRetryableRecording).toBe(true);
+    expect(harness.deleted).toEqual([]);
+
+    const retrySuccess = await harness.controller.retryTranscription();
+    expect(retrySuccess).toBe(true);
+    expect(harness.commits).toEqual([
+      { text: "hello retried text", selection: { start: 18, end: 18 } },
+    ]);
+    expect(harness.controller.currentState.phase).toBe("idle");
+    expect(harness.controller.hasRetryableRecording).toBe(false);
+    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
+  });
+
+  it("cleans up retryable recording file when cancelled", async () => {
+    const harness = createHarness({
+      getTranscriber: () => ({
+        prepare: async () =>
+          preparedTranscription(async () => {
+            throw new VoiceTranscriptionError("transcription-failed", "Network error");
+          }),
+      }),
+    });
+    await harness.controller.start();
+    await harness.controller.stop();
+
+    expect(harness.controller.hasRetryableRecording).toBe(true);
+    expect(harness.deleted).toEqual([]);
+
+    harness.controller.cancel();
+    expect(harness.controller.hasRetryableRecording).toBe(false);
+    expect(harness.deleted).toEqual(["file:///voice.m4a"]);
+  });
 });

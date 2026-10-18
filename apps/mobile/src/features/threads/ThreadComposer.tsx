@@ -583,7 +583,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     attachmentBlockReason;
   const canSend =
     (props.canOperateThread || props.connectionState !== "connected") &&
-    hasContent &&
+    (hasContent || voiceInput.hasRetryableRecording) &&
     !contextImports[composerDraftKey] &&
     !voiceInput.blocksSubmission &&
     sendBlockedReason === null &&
@@ -639,6 +639,11 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const handleSend = useCallback(
     async (followUp?: ActiveTurnComposerAction) => {
       if (voiceInput.blocksSubmission || pendingPastedTextAttachmentCountRef.current > 0) return;
+      if (voiceInput.hasRetryableRecording && (props.draftMessage ?? "").trim().length === 0) {
+        sendAfterDictationRef.current = true;
+        await voiceInput.retry();
+        return;
+      }
       // Typed out in full rather than picked from the menu. Attachments mean the
       // user is sending a prompt, so those go through as usual.
       if (
@@ -1207,6 +1212,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                     phase={voiceInput.state.phase}
                     presentation={voicePresentation}
                     onDismissError={voiceInput.cancel}
+                    onRetry={voiceInput.hasRetryableRecording ? voiceInput.retry : undefined}
                   />
                 ) : (
                   <View className="min-w-0 flex-1 flex-row items-center justify-between">

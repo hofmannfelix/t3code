@@ -206,6 +206,10 @@ export class VoiceInputController {
   private readonly ownedRecordingUris = new Set<string>();
   private recordingConfigured = false;
   private finishing = false;
+  private retryableRecording: {
+    readonly recordingUri: string;
+    readonly capturedDraft: VoiceDraftSnapshot;
+  } | null = null;
 
   constructor(dependencies: VoiceInputControllerDependencies) {
     this.dependencies = dependencies;
@@ -215,8 +219,13 @@ export class VoiceInputController {
     return this.state;
   }
 
+  get hasRetryableRecording(): boolean {
+    return this.retryableRecording !== null && this.state.phase === "error";
+  }
+
   async start(): Promise<void> {
     if (this.state.phase !== "idle" && this.state.phase !== "error") return;
+    this.cleanupRetryableRecording();
     const initiatingDraft = this.dependencies.readDraft();
     if (!initiatingDraft) {
       this.setError("This draft is no longer available.", "retry");
@@ -306,6 +315,7 @@ export class VoiceInputController {
   }
 
   cancel(): void {
+    this.cleanupRetryableRecording();
     switch (this.state.phase) {
       case "idle":
         return;
@@ -367,6 +377,7 @@ export class VoiceInputController {
   }
 
   dispose(): void {
+    this.cleanupRetryableRecording();
     if (this.state.phase === "recording") {
       this.discardRecording(null);
       return;
@@ -413,6 +424,7 @@ export class VoiceInputController {
         );
       } catch (error) {
         if (this.isCurrent(operationToken)) {
+          this.retryableRecording = { recordingUri, capturedDraft };
           this.setError(transcriptionErrorMessage(error), "retry");
         }
         return;
@@ -426,6 +438,7 @@ export class VoiceInputController {
         transcription.locale,
       );
       if (result.kind === "stale") {
+        this.retryableRecording = { recordingUri, capturedDraft };
         this.setError(
           "The draft changed while voice input was running. The transcript was not added.",
           "retry",
@@ -433,11 +446,13 @@ export class VoiceInputController {
         return;
       }
       if (result.kind === "empty") {
+        this.cleanupRetryableRecording();
         this.setError("No speech was detected.", "retry");
         return;
       }
 
       this.dependencies.commitDraft(result.text, result.selection);
+      this.cleanupRetryableRecording();
       this.setState(IDLE_STATE);
     } catch {
       if (this.isCurrent(operationToken)) {
@@ -445,11 +460,82 @@ export class VoiceInputController {
       }
     } finally {
       this.finishing = false;
-      await this.releaseResources();
+      await this.releaseResources(this.retryableRecording !== null);
+    }
+  }
+
+  async retryTranscription(): Promise<boolean> {
+    if (!this.retryableRecording) return false;
+    if (this.state.phase !== "error" && this.state.phase !== "idle") return false;
+
+    const retryable = this.retryableRecording;
+    const transcriber = this.dependencies.getTranscriber();
+    if (!transcriber) {
+      this.setError("Voice transcription is not available.", null);
+      return false;
+    }
+
+    const abortController = new AbortController();
+    this.transcriptionAbortController = abortController;
+    const operationToken = ++this.operationToken;
+    this.setState({ phase: "transcribing", error: null, errorAction: null });
+
+    try {
+      const transcription = await runTranscriptionOperation(() =>
+        transcriber.prepare({ signal: abortController.signal }),
+      );
+      if (!this.isCurrent(operationToken)) return false;
+
+      const transcript = await runTranscriptionOperation(() =>
+        transcription.transcribe(retryable.recordingUri, { signal: abortController.signal }),
+      );
+      if (!this.isCurrent(operationToken)) return false;
+
+      const result = resolveTranscriptCommit(
+        retryable.capturedDraft,
+        this.dependencies.readDraft(),
+        transcript,
+        transcription.locale,
+      );
+      if (result.kind === "stale") {
+        this.setError(
+          "The draft changed while voice input was running. The transcript was not added.",
+          "retry",
+        );
+        return false;
+      }
+      if (result.kind === "empty") {
+        this.cleanupRetryableRecording();
+        this.setError("No speech was detected.", "retry");
+        return false;
+      }
+
+      this.dependencies.commitDraft(result.text, result.selection);
+      this.cleanupRetryableRecording();
+      this.setState(IDLE_STATE);
+      return true;
+    } catch (error) {
+      if (this.isCurrent(operationToken)) {
+        this.setError(transcriptionErrorMessage(error), "retry");
+      }
+      return false;
+    } finally {
+      this.transcriptionAbortController = null;
+    }
+  }
+
+  private cleanupRetryableRecording(): void {
+    if (this.retryableRecording) {
+      try {
+        this.dependencies.deleteRecording(this.retryableRecording.recordingUri);
+      } catch {}
+      this.ownedRecordingUris.delete(this.retryableRecording.recordingUri);
+      this.retryableRecording = null;
     }
   }
 
   private async discardRecording(error: string | null): Promise<void> {
+    this.cleanupRetryableRecording();
     this.invalidateOperation();
     this.setState(
       error
@@ -464,20 +550,28 @@ export class VoiceInputController {
     }
   }
 
-  private async releaseResources(): Promise<void> {
+  private async releaseResources(preserveRetryable = false): Promise<void> {
     this.rememberRecordingUri(this.recordingUri);
     try {
       this.rememberRecordingUri(this.dependencies.recorder.uri);
     } catch {}
     this.recordingUri = null;
     for (const uri of this.ownedRecordingUris) {
+      if (preserveRetryable && this.retryableRecording?.recordingUri === uri) {
+        continue;
+      }
       try {
         this.dependencies.deleteRecording(uri);
       } catch {
         // The cache may already have removed a failed or interrupted recording.
       }
     }
-    this.ownedRecordingUris.clear();
+    if (preserveRetryable && this.retryableRecording) {
+      this.ownedRecordingUris.clear();
+      this.ownedRecordingUris.add(this.retryableRecording.recordingUri);
+    } else {
+      this.ownedRecordingUris.clear();
+    }
     await this.releaseAudioSession();
     releaseSession(this.sessionToken);
     this.sessionToken = null;

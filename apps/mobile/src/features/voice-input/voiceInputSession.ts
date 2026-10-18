@@ -75,8 +75,19 @@ export class VoiceInputSession {
     if (ownerKey !== null && this.ownerKey === ownerKey) this.controller.cancel();
   }
 
-  retry(): Promise<void> {
-    return this.target ? this.start(this.target) : Promise.resolve();
+  get hasRetryableRecording(): boolean {
+    return this.controller.hasRetryableRecording;
+  }
+
+  async retry(): Promise<boolean> {
+    if (this.controller.hasRetryableRecording) {
+      return this.controller.retryTranscription();
+    }
+    if (this.target) {
+      await this.start(this.target);
+      return true;
+    }
+    return false;
   }
 
   start(target: VoiceInputTarget): Promise<void> {

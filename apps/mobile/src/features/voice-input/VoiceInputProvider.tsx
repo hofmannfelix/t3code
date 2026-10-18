@@ -257,6 +257,7 @@ function useVoiceInputRuntime() {
 
   const stop = useCallback(() => controller.stop(), [controller]);
   const cancel = useCallback(() => controller.cancel(), [controller]);
+  const retry = useCallback(() => session.retry(), [session]);
 
   return {
     // Store screenshots show the dictation button even on simulators, whose
@@ -269,6 +270,7 @@ function useVoiceInputRuntime() {
     audioLevels,
     elapsedSeconds,
     isBusy: voiceInputBlocksSubmission(state),
+    hasRetryableRecording: session.hasRetryableRecording,
     ownerKey,
     label,
     focusedOwners,
@@ -276,5 +278,6 @@ function useVoiceInputRuntime() {
     session,
     stop,
     cancel,
+    retry,
   };
 }
