@@ -19,11 +19,15 @@ import { usePreparedConnection } from "../../state/session";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { mobilePreferencesAtom } from "../../state/preferences";
+import { savePreferencesPatch } from "../../persistence/imperative";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { Directory, File, Paths } from "expo-file-system";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import { getDeviceTtsConfig, streamWavSegments } from "./deviceTts";
 import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
+import { appAtomRegistry } from "../../state/atom-registry";
+import { environmentThreadShells } from "../../state/threads";
+import { environmentProjects } from "../../state/projects";
 
 export interface ReadAloudSpeech {
   readonly key: string | null;
@@ -69,6 +73,11 @@ interface ThreadFeedMessageEntry {
 const T3NativeControls =
   Platform.OS === "ios"
     ? (requireOptionalNativeModule("T3NativeControls") as {
+        activateAudioSession?: (options?: {
+          title?: string;
+          projectTitle?: string;
+          waitingAudioMode?: string;
+        }) => Promise<boolean>;
         speakText?: (
           text: string,
           options?: {
@@ -81,24 +90,151 @@ const T3NativeControls =
         stopSpeaking?: () => Promise<void>;
         pauseSpeaking?: () => Promise<void>;
         resumeSpeaking?: () => Promise<void>;
+        pauseWaitingAudio?: () => Promise<void>;
+        resumeWaitingAudio?: (options?: { title?: string; projectTitle?: string }) => Promise<void>;
+        setWaitingAudioMode?: (mode: string) => Promise<void>;
         isSpeaking?: () => boolean;
         deactivateAudioSession?: () => Promise<boolean>;
+        enforceBuiltInMicrophone?: () => Promise<boolean>;
+        resetPreferredAudioInput?: () => Promise<boolean>;
       } | null)
     : null;
 
 const EMPTY_SETTINGS_ATOM = Atom.make<any>(null);
 
+if (
+  Platform.OS === "ios" &&
+  T3NativeControls &&
+  typeof (T3NativeControls as { addListener?: unknown }).addListener === "function"
+) {
+  try {
+    (
+      T3NativeControls as {
+        addListener: (event: string, cb: (data: { phase?: string }) => void) => void;
+      }
+    ).addListener("onSpeechPhaseChanged", (event: { phase?: string }) => {
+      if (event?.phase === "paused") {
+        setSpeech({ ...currentSpeech, phase: "paused" });
+      } else if (event?.phase === "playing") {
+        setSpeech({ ...currentSpeech, phase: "playing" });
+      } else if (event?.phase === "waiting" || event?.phase === "idle") {
+        if (currentSpeech.phase === "paused" || currentSpeech.phase === "playing") {
+          setSpeech({ ...currentSpeech, phase: null });
+        }
+      }
+    });
+    (
+      T3NativeControls as {
+        addListener: (event: string, cb: (data: { command?: string }) => void) => void;
+      }
+    ).addListener("onRemoteCommand", (event: { command?: string }) => {
+      const cmd = event?.command;
+      if (cmd === "pause") {
+        isUserPausedState = true;
+        if (playlist) {
+          try {
+            playlist.pause();
+          } catch {}
+        }
+        if (currentSpeech.phase === "playing" || currentSpeech.phase === "loading") {
+          setSpeech({ ...currentSpeech, phase: "paused" });
+        }
+      } else if (cmd === "play") {
+        isUserPausedState = false;
+        if (playlist) {
+          try {
+            playlist.play();
+            setSpeech({ ...currentSpeech, phase: "playing" });
+          } catch {}
+        } else if (currentSpeech.phase === "paused") {
+          setSpeech({ ...currentSpeech, phase: "playing" });
+        } else if (isAudioSessionActive) {
+          if (T3NativeControls?.resumeWaitingAudio) {
+            try {
+              void T3NativeControls.resumeWaitingAudio({
+                projectTitle: activeAudioSessionTarget?.projectTitle,
+                title: "Warte auf Antwort...",
+              });
+            } catch {}
+          }
+          setSpeech({ ...currentSpeech, phase: null });
+        }
+      } else if (cmd === "toggle") {
+        if (currentSpeech.phase === "playing" || currentSpeech.phase === "loading") {
+          isUserPausedState = true;
+          if (playlist) {
+            try {
+              playlist.pause();
+            } catch {}
+          }
+          if (T3NativeControls?.pauseSpeaking) {
+            try {
+              void T3NativeControls.pauseSpeaking();
+            } catch {}
+          }
+          if (T3NativeControls?.pauseWaitingAudio) {
+            try {
+              void T3NativeControls.pauseWaitingAudio();
+            } catch {}
+          }
+          setSpeech({ ...currentSpeech, phase: "paused" });
+        } else if (currentSpeech.phase === "paused") {
+          isUserPausedState = false;
+          if (playlist) {
+            try {
+              playlist.play();
+              setSpeech({ ...currentSpeech, phase: "playing" });
+            } catch {}
+          } else if (T3NativeControls?.resumeSpeaking) {
+            try {
+              void T3NativeControls.resumeSpeaking();
+              setSpeech({ ...currentSpeech, phase: "playing" });
+            } catch {}
+          }
+        } else if (isAudioSessionActive) {
+          if (isUserPausedState) {
+            isUserPausedState = false;
+            if (T3NativeControls?.resumeWaitingAudio) {
+              try {
+                void T3NativeControls.resumeWaitingAudio({
+                  projectTitle: activeAudioSessionTarget?.projectTitle,
+                  title: "Warte auf Antwort...",
+                });
+              } catch {}
+            }
+            setSpeech({ ...currentSpeech, phase: null });
+          } else {
+            isUserPausedState = true;
+            if (T3NativeControls?.pauseWaitingAudio) {
+              try {
+                void T3NativeControls.pauseWaitingAudio();
+              } catch {}
+            }
+            setSpeech({ ...currentSpeech, phase: "paused" });
+          }
+        }
+      } else if (cmd === "skipForward") {
+        if (playlist) {
+          try {
+            void playlist.seekTo(playlist.currentTime + 10);
+          } catch {}
+        }
+      } else if (cmd === "skipBackward") {
+        if (playlist) {
+          try {
+            void playlist.seekTo(Math.max(0, playlist.currentTime - 10));
+          } catch {}
+        }
+      } else if (cmd === "stop") {
+        stopGlobalAudioSession();
+      }
+    });
+  } catch {}
+}
+
 const START_WATCHDOG_MS = 5_000;
-/**
- * Read-aloud contract: audio starts within 20s or fails visibly. Applies to
- * the device stream's first segment; playback itself is never cut off.
- */
-export const STREAM_START_TIMEOUT_MS = 20_000;
-/**
- * Server path: the provider may take 30s per attempt plus 429 retries, so
- * this side waits longer before surfacing "the server did not answer".
- */
-export const SYNTHESIZE_TIMEOUT_MS = 60_000;
+const STREAM_START_TIMEOUT_MS = 20_000;
+export const SYNTHESIZE_TIMEOUT_MS = 30_000;
 
 export interface ArmedReadAloudTarget {
   readonly threadId: string;
@@ -107,6 +243,41 @@ export interface ArmedReadAloudTarget {
   readonly projectTitle?: string;
   readonly armedAt?: number;
 }
+
+export interface ActiveAudioSessionTarget {
+  readonly threadId?: string | null;
+  readonly environmentId?: EnvironmentId | null;
+  readonly threadTitle?: string;
+  readonly projectTitle?: string;
+}
+
+let isAudioSessionActive = false;
+let activeAudioSessionTarget: ActiveAudioSessionTarget | null = null;
+let audioSessionActivatedAt = 0;
+const audioSessionListeners = new Set<() => void>();
+
+const notifyAudioSessionListeners = () => {
+  for (const listener of audioSessionListeners) {
+    listener();
+  }
+};
+
+export const isGlobalAudioSessionActive = (): boolean => isAudioSessionActive;
+export const getActiveAudioSessionTarget = (): ActiveAudioSessionTarget | null =>
+  activeAudioSessionTarget;
+
+export const useIsAudioSessionActive = (): boolean => {
+  return useSyncExternalStore(
+    (onStoreChange) => {
+      audioSessionListeners.add(onStoreChange);
+      return () => {
+        audioSessionListeners.delete(onStoreChange);
+      };
+    },
+    isGlobalAudioSessionActive,
+    isGlobalAudioSessionActive,
+  );
+};
 
 const armedTargets = new Map<string, ArmedReadAloudTarget>();
 let cachedArmedTargets: ReadonlyArray<ArmedReadAloudTarget> = Object.freeze([]);
@@ -118,19 +289,13 @@ const notifyArmedTargetListeners = () => {
   }
 };
 
-export function resolveProjectTitle(options: {
+export function resolveProjectTitle(options?: {
   readonly environmentId?: EnvironmentId | null;
   readonly threadId?: string | null;
   readonly projectTitle?: string | null;
 }): string {
-  if (options.projectTitle && options.projectTitle.trim().length > 0) {
+  if (options?.projectTitle && options.projectTitle.trim().length > 0) {
     return options.projectTitle.trim();
-  }
-  if (options.threadId) {
-    const armed = armedTargets.get(options.threadId);
-    if (armed?.projectTitle && armed.projectTitle.trim().length > 0) {
-      return armed.projectTitle.trim();
-    }
   }
   return "T3 Code";
 }
@@ -181,7 +346,7 @@ export const armReadAloudOnNextReply = (
     environmentId,
     threadTitle: threadTitle ?? previous?.threadTitle,
     projectTitle: projectTitle ?? previous?.projectTitle,
-    armedAt: Date.now(),
+    armedAt: previous?.armedAt ?? Date.now(),
   };
 
   const isUnchanged =
@@ -240,6 +405,101 @@ export const useIsThreadReadAloudArmed = (threadId?: string | null): boolean => 
   return armedTargets.some((target) => target.threadId === threadId);
 };
 
+let currentWaitingAudioMode: "music" | "silent" = "music";
+export const setGlobalWaitingAudioMode = (mode: "music" | "silent") => {
+  currentWaitingAudioMode = mode;
+  if (Platform.OS === "ios" && T3NativeControls?.setWaitingAudioMode) {
+    void T3NativeControls.setWaitingAudioMode(mode);
+  }
+};
+
+export const startGlobalAudioSession = async (
+  target?: ActiveAudioSessionTarget,
+  options?: { readonly persist?: boolean },
+) => {
+  isAudioSessionActive = true;
+  audioSessionActivatedAt = Date.now();
+  if (target) {
+    activeAudioSessionTarget = target;
+    if (target.threadId) {
+      armReadAloudOnNextReply({
+        threadId: target.threadId,
+        environmentId: target.environmentId,
+        threadTitle: target.threadTitle,
+        projectTitle: target.projectTitle,
+      });
+    }
+  }
+  if (options?.persist ?? true) {
+    try {
+      void savePreferencesPatch({
+        audioSessionActive: true,
+        audioSessionTarget: target
+          ? {
+              environmentId: target.environmentId ? String(target.environmentId) : null,
+              threadId: target.threadId ? String(target.threadId) : null,
+              threadTitle: target.threadTitle ?? null,
+              projectTitle: target.projectTitle ?? null,
+            }
+          : null,
+      }).catch(() => {});
+    } catch {}
+  }
+  if (Platform.OS === "ios" && T3NativeControls?.activateAudioSession) {
+    try {
+      await T3NativeControls.activateAudioSession({
+        projectTitle: target?.projectTitle,
+        title: "Warte auf Antwort...",
+        waitingAudioMode: currentWaitingAudioMode,
+      });
+    } catch {}
+  }
+  await ensureAudioSession();
+  notifyAudioSessionListeners();
+  for (const listener of listeners) listener();
+  syncAudioLiveActivity(currentSpeech);
+};
+
+export const stopGlobalAudioSession = (options?: { readonly persist?: boolean }) => {
+  isAudioSessionActive = false;
+  activeAudioSessionTarget = null;
+  audioSessionActivatedAt = 0;
+  clearArmedReadAloudTargets();
+  stopCurrent();
+  void deactivateAudioSession();
+  if (options?.persist ?? true) {
+    try {
+      void savePreferencesPatch({
+        audioSessionActive: false,
+        audioSessionTarget: null,
+      }).catch(() => {});
+    } catch {}
+  }
+  if (Platform.OS === "ios" && T3NativeControls?.deactivateAudioSession) {
+    try {
+      void T3NativeControls.deactivateAudioSession();
+    } catch {}
+  }
+  notifyAudioSessionListeners();
+  for (const listener of listeners) listener();
+  syncAudioLiveActivity(IDLE);
+};
+
+export const useIsAudioBarVisible = (): boolean => {
+  const isSessionActive = useIsAudioSessionActive();
+  const current = useSyncExternalStore(
+    (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    () => currentSpeech,
+    () => IDLE,
+  );
+  return isSessionActive || current.phase !== null;
+};
+
 export function useThreadAudioMode(
   threadId?: string | null,
   options?: {
@@ -248,40 +508,29 @@ export function useThreadAudioMode(
     readonly projectTitle?: string;
   },
 ) {
+  const isGlobalActive = useIsAudioSessionActive();
   const isArmed = useIsThreadReadAloudArmed(threadId);
-  const { speech, pause, resume, seekBy, stop } = useReadAloud(options?.environmentId ?? undefined);
+  const { speech, pause, resume, seekBy } = useReadAloud(options?.environmentId ?? undefined);
   const isCurrentThreadPlayback = Boolean(
     threadId && speech.phase !== null && speech.threadId === threadId,
   );
-  const isActive = isArmed || isCurrentThreadPlayback;
+  const isActive = isGlobalActive || isArmed || isCurrentThreadPlayback;
 
   const toggleAudioMode = useCallback(
     (desiredActive?: boolean) => {
-      if (!threadId) return;
       const next = desiredActive ?? !isActive;
       if (next) {
-        armReadAloudOnNextReply({
-          threadId,
+        void startGlobalAudioSession({
+          threadId: threadId ?? null,
           environmentId: options?.environmentId ?? null,
           threadTitle: options?.threadTitle,
           projectTitle: options?.projectTitle,
         });
       } else {
-        disarmReadAloudOnNextReply(threadId);
-        if (isCurrentThreadPlayback) {
-          stop();
-        }
+        stopGlobalAudioSession();
       }
     },
-    [
-      threadId,
-      isActive,
-      isCurrentThreadPlayback,
-      options?.environmentId,
-      options?.threadTitle,
-      options?.projectTitle,
-      stop,
-    ],
+    [isActive, options?.environmentId, options?.projectTitle, options?.threadTitle, threadId],
   );
 
   return {
@@ -292,7 +541,7 @@ export function useThreadAudioMode(
     pause,
     resume,
     seekBy,
-    stop,
+    stop: stopGlobalAudioSession,
     toggleAudioMode,
   };
 }
@@ -310,7 +559,7 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
     const activities = getAgentLiveActivities();
     const armedTargets = getArmedReadAloudTargets();
 
-    if (!speech.phase) {
+    if (!speech.phase && !isAudioSessionActive) {
       if (activeAudioLiveActivity) {
         try {
           void activeAudioLiveActivity.end("immediate");
@@ -328,46 +577,166 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
     }
 
     const nowIso = new Date().toISOString();
-    const audioStatus = speech.phase === "loading" ? "Lade Audio..." : "Liest Antwort vor";
+    const audioStatus =
+      speech.phase === "loading"
+        ? "Lade Audio..."
+        : speech.phase === "playing"
+          ? "Liest Antwort vor"
+          : speech.phase === "paused"
+            ? "Pausiert"
+            : "Audio-Session aktiv";
+
+    const targetEnvId = speech.environmentId
+      ? String(speech.environmentId)
+      : activeAudioSessionTarget?.environmentId
+        ? String(activeAudioSessionTarget.environmentId)
+        : "";
+    const targetThreadId = speech.threadId ?? activeAudioSessionTarget?.threadId ?? "";
+    const targetProjectTitle =
+      speech.projectTitle ?? activeAudioSessionTarget?.projectTitle ?? "T3 Code";
+    const targetThreadTitle =
+      speech.title ?? activeAudioSessionTarget?.threadTitle ?? "Sprachausgabe";
+
+    const audioRowDeepLink =
+      targetEnvId && targetThreadId
+        ? `/threads/${targetEnvId}/${targetThreadId}`
+        : targetThreadId
+          ? `/threads/${targetThreadId}`
+          : "/";
 
     const audioRow: AgentActivityRowProps = {
-      environmentId: speech.environmentId ? String(speech.environmentId) : "",
-      threadId: speech.threadId ?? "",
-      projectTitle: speech.projectTitle || "T3 Code",
-      threadTitle: speech.title || "Sprachausgabe",
+      environmentId: targetEnvId,
+      threadId: targetThreadId,
+      projectTitle: targetProjectTitle,
+      threadTitle: targetThreadTitle,
       modelTitle: "",
       phase: "running",
       status: audioStatus,
       updatedAt: nowIso,
-      deepLink: speech.threadId ? `/threads/${speech.threadId}` : "/",
+      deepLink: audioRowDeepLink,
       isAudioActive: true,
     };
 
+    const seenThreadIds = new Set<string>();
+    if (targetThreadId) seenThreadIds.add(targetThreadId);
+
     const armedRows: AgentActivityRowProps[] = armedTargets
-      .filter((t) => t.threadId !== speech.threadId)
-      .map((t) => ({
-        environmentId: t.environmentId ? String(t.environmentId) : "",
-        threadId: t.threadId,
-        projectTitle: t.projectTitle || "T3 Code",
-        threadTitle: t.threadTitle || "Thread",
-        modelTitle: "",
-        phase: "running",
-        status: "Antwort abwarten",
-        updatedAt: nowIso,
-        deepLink: `/threads/${t.threadId}`,
-        isAudioArmed: true,
-      }));
+      .filter((t) => t.threadId !== targetThreadId)
+      .map((t) => {
+        const envId = t.environmentId ? String(t.environmentId) : "";
+        seenThreadIds.add(t.threadId);
+        return {
+          environmentId: envId,
+          threadId: t.threadId,
+          projectTitle: t.projectTitle || "T3 Code",
+          threadTitle: t.threadTitle || "Thread",
+          modelTitle: "",
+          phase: "running",
+          status: "Antwort abwarten",
+          updatedAt: nowIso,
+          deepLink: envId ? `/threads/${envId}/${t.threadId}` : `/threads/${t.threadId}`,
+          isAudioArmed: true,
+        };
+      });
+
+    const workingRows: AgentActivityRowProps[] = [];
+    const recentRows: AgentActivityRowProps[] = [];
+    const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+    const nowMs = Date.now();
+
+    try {
+      const shells = appAtomRegistry.get(environmentThreadShells.navigationThreadShellsAtom) ?? [];
+      for (const shell of shells) {
+        if (!shell || !shell.id || seenThreadIds.has(shell.id)) continue;
+        const envIdStr = String(shell.environmentId);
+        const threadIdStr = String(shell.id);
+        const project = appAtomRegistry.get(
+          environmentProjects.projectAtom({
+            environmentId: shell.environmentId,
+            projectId: shell.projectId,
+          }),
+        );
+        const projectTitle = project?.title || "T3 Code";
+        const threadTitle = shell.title || "Thread";
+        const deepLink = `/threads/${envIdStr}/${threadIdStr}`;
+
+        if (shell.hasPendingApprovals) {
+          workingRows.push({
+            environmentId: envIdStr,
+            threadId: threadIdStr,
+            projectTitle,
+            threadTitle,
+            modelTitle: "",
+            phase: "waiting_for_approval",
+            status: "Genehmigung erforderlich",
+            updatedAt: shell.updatedAt ?? nowIso,
+            deepLink,
+          });
+          seenThreadIds.add(threadIdStr);
+        } else if (shell.hasPendingUserInput) {
+          workingRows.push({
+            environmentId: envIdStr,
+            threadId: threadIdStr,
+            projectTitle,
+            threadTitle,
+            modelTitle: "",
+            phase: "waiting_for_input",
+            status: "Eingabe erforderlich",
+            updatedAt: shell.updatedAt ?? nowIso,
+            deepLink,
+          });
+          seenThreadIds.add(threadIdStr);
+        } else if (
+          shell.runtime !== null &&
+          ["preparing", "queued", "starting", "running", "waiting"].includes(shell.runtime.status)
+        ) {
+          workingRows.push({
+            environmentId: envIdStr,
+            threadId: threadIdStr,
+            projectTitle,
+            threadTitle,
+            modelTitle: "",
+            phase: "running",
+            status: "Arbeitet",
+            updatedAt: shell.updatedAt ?? nowIso,
+            deepLink,
+          });
+          seenThreadIds.add(threadIdStr);
+        } else if (shell.latestRun?.completedAt) {
+          const completedAtMs = Date.parse(shell.latestRun.completedAt);
+          if (!Number.isNaN(completedAtMs) && nowMs - completedAtMs <= THREE_HOURS_MS) {
+            const isFailed = shell.latestRun.status === "failed";
+            recentRows.push({
+              environmentId: envIdStr,
+              threadId: threadIdStr,
+              projectTitle,
+              threadTitle,
+              modelTitle: "",
+              phase: isFailed ? "failed" : "completed",
+              status: isFailed ? "Fehlgeschlagen" : "Fertig",
+              updatedAt: shell.latestRun.completedAt,
+              deepLink,
+            });
+            seenThreadIds.add(threadIdStr);
+          }
+        }
+      }
+    } catch {
+      // Best-effort registry read
+    }
+
+    const allActivities = [audioRow, ...armedRows, ...workingRows, ...recentRows].slice(0, 5);
 
     const props: AgentActivityProps = {
-      title: speech.title || "T3 Code",
+      title: speech.title || targetThreadTitle || "T3 Code",
       subtitle: audioStatus,
-      activeCount: 1 + armedRows.length,
+      activeCount: 1 + armedRows.length + workingRows.length,
       updatedAt: nowIso,
-      audioPhase: speech.phase === "paused" ? "idle" : speech.phase,
-      audioThreadId: speech.threadId,
-      audioThreadTitle: speech.title,
-      audioProjectTitle: speech.projectTitle,
-      activities: [audioRow, ...armedRows],
+      audioPhase: speech.phase === "paused" ? "idle" : (speech.phase ?? "idle"),
+      audioThreadId: targetThreadId,
+      audioThreadTitle: targetThreadTitle,
+      audioProjectTitle: targetProjectTitle,
+      activities: allActivities,
     };
 
     if (activeAudioLiveActivity) {
@@ -405,7 +774,7 @@ const setSpeech = (next: ReadAloudSpeech) => {
   currentSpeech = next;
   for (const listener of listeners) listener();
   syncAudioLiveActivity(next);
-  if (next.phase === null) {
+  if (next.phase === null && !isAudioSessionActive) {
     void deactivateAudioSession();
   }
 };
@@ -435,12 +804,17 @@ const cleanupActiveSegments = () => {
   activeSegmentUris.clear();
 };
 
-/** Stopping is a take-over: a pending auto-read queue dies with it. */
+/** Stopping is a take-over: all pending answer blocks and active audio die with it. */
+export const stopAllSpeech = () => stopCurrent();
+
 const stopCurrent = () => {
   runCounter += 1;
+  isUserPausedState = false;
   activeStreamAbort?.abort();
   activeStreamAbort = null;
-  readQueue = [];
+  answerBlockQueue = [];
+  currentAnswerBlock = null;
+  currentBlockChunks = [];
   if (T3NativeControls?.stopSpeaking) {
     try {
       void T3NativeControls.stopSpeaking();
@@ -451,26 +825,6 @@ const stopCurrent = () => {
   setSpeech(IDLE);
 };
 
-const playNextFromQueue = () => {
-  if (playThroughCurrentDeps === null) return;
-  const next = readQueue.shift();
-  if (!next) {
-    setSpeech(IDLE);
-    return;
-  }
-  setSpeech({
-    ...IDLE,
-    queued: readQueue.length,
-    phase: "loading",
-    key: next.key,
-    threadId: next.threadId ?? currentSpeech.threadId,
-    environmentId: next.environmentId ?? currentSpeech.environmentId,
-    title: next.title ?? currentSpeech.title,
-    projectTitle: next.projectTitle ?? currentSpeech.projectTitle,
-  });
-  playThroughCurrentDeps(next);
-};
-
 const announceExhausted = (message: string) => {
   const now = Date.now();
   // A cascade would stack alerts; the first one stands in for the rest.
@@ -478,8 +832,11 @@ const announceExhausted = (message: string) => {
     lastFailureAt = now;
     Alert.alert("Read aloud unavailable", message);
   }
-  readQueue = [];
+  answerBlockQueue = [];
+  currentAnswerBlock = null;
+  currentBlockChunks = [];
   cleanupActiveSegments();
+  releasePlaylist();
   setSpeech(IDLE);
 };
 
@@ -534,28 +891,275 @@ let currentSpeech: ReadAloudSpeech = IDLE;
 const listeners = new Set<Listener>();
 
 let activeSpeechEnvironmentId: EnvironmentId | null = null;
-let readQueue: QueueEntry[] = [];
+
+/**
+ * Global queue of complete answer blocks (one block per thread reply).
+ * Managed strictly according to First-In, First-Out (FIFO) so that answers
+ * from different threads or consecutive replies NEVER interleave their snippets.
+ */
+let answerBlockQueue: ReadItem[] = [];
+let currentAnswerBlock: ReadItem | null = null;
+let currentBlockChunks: QueueEntry[] = [];
+
+export const isAudioSessionOrPlaybackActive = (): boolean =>
+  isAudioSessionActive || currentSpeech.phase !== null || answerBlockQueue.length > 0;
+
 let enqueueCounter = 0;
 let lastFailureAt = 0;
 let runCounter = 0;
+let isUserPausedState = false;
 
 let playlist: AudioPlaylist | null = null;
 let playlistSubscription: { remove: () => void } | null = null;
 let activeStreamAbort: AbortController | null = null;
 const activeSegmentUris = new Set<string>();
 
+let pausedByVoiceInput: "speech" | "waiting" | null = null;
+
+export const pauseAudioForVoiceRecording = () => {
+  if (currentSpeech.phase === "playing" || currentSpeech.phase === "loading") {
+    pausedByVoiceInput = "speech";
+    if (playlist) {
+      try {
+        playlist.pause();
+      } catch (e) {
+        log("pauseAudioForVoiceRecording: playlist.pause() failed", e);
+      }
+    }
+    if (T3NativeControls?.pauseSpeaking) {
+      try {
+        void T3NativeControls.pauseSpeaking();
+      } catch {}
+    }
+    if (T3NativeControls?.pauseWaitingAudio) {
+      try {
+        void T3NativeControls.pauseWaitingAudio();
+      } catch {}
+    }
+    setSpeech({ ...currentSpeech, phase: "paused" });
+  } else if (isAudioSessionActive && !isUserPausedState) {
+    pausedByVoiceInput = "waiting";
+    if (T3NativeControls?.pauseWaitingAudio) {
+      try {
+        void T3NativeControls.pauseWaitingAudio();
+      } catch {}
+    }
+  }
+};
+
+export const resumeAudioAfterVoiceRecording = async () => {
+  const previousState = pausedByVoiceInput;
+  pausedByVoiceInput = null;
+
+  if (!previousState) return;
+
+  await ensureAudioSession();
+
+  if (previousState === "speech") {
+    if (playlist) {
+      try {
+        playlist.play();
+        setSpeech({ ...currentSpeech, phase: "playing" });
+        return;
+      } catch (e) {
+        log("resumeAudioAfterVoiceRecording: playlist.play() failed", e);
+      }
+    }
+    if (T3NativeControls?.resumeSpeaking) {
+      try {
+        await T3NativeControls.resumeSpeaking();
+        setSpeech({ ...currentSpeech, phase: "playing" });
+        return;
+      } catch {}
+    }
+  } else if (previousState === "waiting") {
+    if (isAudioSessionActive && !isUserPausedState) {
+      if (T3NativeControls?.resumeWaitingAudio) {
+        try {
+          await T3NativeControls.resumeWaitingAudio({
+            projectTitle: activeAudioSessionTarget?.projectTitle,
+            title: "Warte auf Antwort...",
+          });
+        } catch {}
+      }
+    }
+  }
+};
+
 let chunkedPlayback = true;
 
 let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
+let activeStartAnswerBlock: ((item: ReadItem, isCurrent: () => boolean) => void) | null = null;
 
-/**
- * Read-aloud for the phone:
- * When device Gemini is configured:
- * Uses a single SSE stream from Gemini and queues ready segment WAV files
- * into the native AVQueuePlayer (via AudioPlaylist) for hardware gapless playback.
- * When server provider is configured:
- * The paired server synthesizes clips, downloaded to cache, and played.
- */
+const startAnswerBlock = (item: ReadItem) => {
+  log("startAnswerBlock:", item.key, "source:", item.source);
+  currentAnswerBlock = item;
+  currentBlockChunks = [];
+  speakStartedAt = Date.now();
+  runCounter += 1;
+  const run = runCounter;
+  const isCurrent = () => run === runCounter;
+
+  const resolvedEnvId = item.environmentId ?? activeSpeechEnvironmentId ?? null;
+  if (resolvedEnvId) activeSpeechEnvironmentId = resolvedEnvId;
+
+  const projectTitle = resolveProjectTitle({
+    environmentId: resolvedEnvId,
+    threadId: item.threadId,
+    projectTitle: item.projectTitle,
+  });
+
+  setSpeech({
+    ...IDLE,
+    key: item.key,
+    threadId: item.threadId ?? null,
+    environmentId: resolvedEnvId,
+    title: item.title ?? null,
+    projectTitle,
+    phase: "loading",
+    source: item.source,
+    queued: answerBlockQueue.length,
+  });
+
+  if (activeStartAnswerBlock) {
+    activeStartAnswerBlock(item, isCurrent);
+  } else if (playThroughCurrentDeps) {
+    playThroughCurrentDeps(item);
+  }
+};
+
+const finishCurrentAnswerBlock = () => {
+  log(
+    "finishCurrentAnswerBlock: finished block",
+    currentAnswerBlock?.key,
+    "remaining in FIFO queue:",
+    answerBlockQueue.length,
+  );
+  releasePlaylist();
+  cleanupActiveSegments();
+  currentAnswerBlock = null;
+  currentBlockChunks = [];
+
+  if (answerBlockQueue.length > 0) {
+    const nextBlock = answerBlockQueue.shift()!;
+    log(
+      "finishCurrentAnswerBlock: starting next block (FIFO):",
+      nextBlock.key,
+      "remaining:",
+      answerBlockQueue.length,
+    );
+    startAnswerBlock(nextBlock);
+  } else {
+    log("finishCurrentAnswerBlock: FIFO queue empty, returning to idle");
+    setSpeech(IDLE);
+    if (isAudioSessionActive) {
+      void T3NativeControls?.resumeWaitingAudio?.({
+        projectTitle: currentSpeech.projectTitle ?? "T3 Code",
+        title: "Warte auf Antwort...",
+      });
+    }
+  }
+};
+
+const enqueueAnswerBlock = (
+  item: {
+    readonly key: string;
+    readonly text: string;
+    readonly source?: "manual" | "auto";
+    readonly clipUri?: string;
+    readonly threadId?: string;
+    readonly environmentId?: EnvironmentId;
+    readonly title?: string;
+    readonly projectTitle?: string;
+  },
+  options?: { readonly forceImmediate?: boolean },
+) => {
+  if (currentAnswerBlock?.key === item.key) {
+    log("enqueueAnswerBlock: already current block, ignoring duplicate", item.key);
+    return;
+  }
+  if (answerBlockQueue.some((b) => b.key === item.key)) {
+    log("enqueueAnswerBlock: already in FIFO queue, ignoring duplicate", item.key);
+    return;
+  }
+
+  const cleanedText = item.clipUri ? item.text : cleanTextForSpeech(item.text);
+  if (!item.clipUri && cleanedText.length === 0) {
+    log("enqueueAnswerBlock: ignored, text is empty after sanitization");
+    return;
+  }
+
+  const resolvedEnvId = item.environmentId ?? activeSpeechEnvironmentId ?? null;
+  if (resolvedEnvId) activeSpeechEnvironmentId = resolvedEnvId;
+
+  const projectTitle = resolveProjectTitle({
+    environmentId: resolvedEnvId,
+    threadId: item.threadId,
+    projectTitle: item.projectTitle,
+  });
+
+  const textToSpeak = item.clipUri
+    ? cleanedText
+    : prefixTextWithProject(cleanedText, {
+        environmentId: resolvedEnvId,
+        threadId: item.threadId,
+        projectTitle,
+      });
+
+  const blockItem: ReadItem = {
+    key: item.key,
+    text: textToSpeak,
+    source: item.source ?? "auto",
+    clipUri: item.clipUri,
+    threadId: item.threadId,
+    environmentId: resolvedEnvId ?? undefined,
+    title: item.title,
+    projectTitle,
+  };
+
+  if (options?.forceImmediate) {
+    stopCurrent();
+    startAnswerBlock(blockItem);
+    return;
+  }
+
+  if (currentAnswerBlock === null && currentSpeech.phase === null) {
+    startAnswerBlock(blockItem);
+  } else {
+    answerBlockQueue.push(blockItem);
+    log(
+      "enqueueAnswerBlock: appended to FIFO queue",
+      blockItem.key,
+      "total queued blocks:",
+      answerBlockQueue.length,
+    );
+    setSpeech({
+      ...currentSpeech,
+      queued: answerBlockQueue.length,
+    });
+  }
+};
+
+const skipToNextBlock = () => {
+  log("skipToNextBlock called, queued blocks:", answerBlockQueue.length);
+  if (answerBlockQueue.length > 0) {
+    if (activeStreamAbort) {
+      activeStreamAbort.abort();
+      activeStreamAbort = null;
+    }
+    releasePlaylist();
+    cleanupActiveSegments();
+    if (T3NativeControls?.stopSpeaking) {
+      try {
+        void T3NativeControls.stopSpeaking();
+      } catch {}
+    }
+    finishCurrentAnswerBlock();
+  } else {
+    stopCurrent();
+  }
+};
+
 export function useReadAloud(environmentId?: EnvironmentId | null) {
   const targetEnvId = environmentId ?? activeSpeechEnvironmentId ?? null;
   const preparedConnection = usePreparedConnection(targetEnvId);
@@ -563,6 +1167,11 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
   const readAloudPreferences = AsyncResult.isSuccess(preferencesResult)
     ? preferencesResult.value
     : undefined;
+
+  const waitingAudioPreference = readAloudPreferences?.readAloudWaitingAudio ?? "music";
+  useEffect(() => {
+    setGlobalWaitingAudioMode(waitingAudioPreference);
+  }, [waitingAudioPreference]);
   const readAloudProvider = readAloudPreferences?.readAloudProvider;
   const readAloudGeminiApiKey = readAloudPreferences?.readAloudGeminiApiKey;
   const readAloudGeminiModel = readAloudPreferences?.readAloudGeminiModel;
@@ -617,8 +1226,13 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
             projectTitle: itemToSpeak.projectTitle ?? currentSpeech.projectTitle,
             phase: "playing",
             source: itemToSpeak.source,
-            queued: readQueue.length,
+            queued: answerBlockQueue.length,
           });
+          if (T3NativeControls?.pauseWaitingAudio) {
+            try {
+              void T3NativeControls.pauseWaitingAudio();
+            } catch {}
+          }
           log(
             "speakWithNativeFallback: speaking via iOS AVSpeechSynthesizer",
             `${itemToSpeak.text.length} chars`,
@@ -629,11 +1243,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
             projectTitle: itemToSpeak.projectTitle ?? "T3 Code",
           });
           if (!isCurrent()) return true;
-          if (itemToSpeak.source === "auto" || readQueue.length > 0) {
-            playNextFromQueue();
-          } else {
-            setSpeech(IDLE);
-          }
+          finishCurrentAnswerBlock();
           return true;
         } catch (e) {
           log("speakWithNativeFallback failed", e);
@@ -649,10 +1259,8 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
    * files directly into the native AVQueuePlayer playlist for seamless 0ms playback.
    */
   const consumeDeviceStream = useCallback(
-    (item: ReadItem) => {
+    (item: ReadItem, isCurrent: () => boolean) => {
       if (!deviceTtsConfig) return;
-      const run = runCounter;
-      const isCurrent = () => run === runCounter;
       const abort = new AbortController();
       activeStreamAbort = abort;
       log(
@@ -669,6 +1277,12 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         let firstSegmentSeen = false;
         let streamDone = false;
         let started = false;
+        let isUserPaused = false;
+        if (T3NativeControls?.pauseWaitingAudio) {
+          try {
+            void T3NativeControls.pauseWaitingAudio();
+          } catch {}
+        }
 
         const startWatchdog = setTimeout(() => {
           if (!firstSegmentSeen && activeStreamAbort === abort) {
@@ -704,10 +1318,19 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
               });
               playlist = pl;
               try {
-                pl.setActiveForLockScreen(true, {
-                  title: item.title ?? "Antwort",
-                  artist: item.projectTitle ? `T3 Code · ${item.projectTitle}` : "T3 Code",
-                });
+                pl.setActiveForLockScreen(
+                  true,
+                  {
+                    title: item.title ?? "Antwort",
+                    artist: item.projectTitle ? `T3 Code · ${item.projectTitle}` : "T3 Code",
+                  },
+                  {
+                    showPreviousTrack: true,
+                    showNextTrack: true,
+                    showSeekForward: true,
+                    showSeekBackward: true,
+                  },
+                );
               } catch {}
 
               pl.addListener("trackChanged", ({ previousIndex, currentIndex }) => {
@@ -726,7 +1349,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
                     "playlist: PLAYING",
                     `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
                     "queued:",
-                    readQueue.length,
+                    answerBlockQueue.length,
                   );
                   setSpeech({
                     key: item.key,
@@ -736,19 +1359,32 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
                     projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
                     phase: "playing",
                     source: item.source,
-                    queued: readQueue.length,
+                    queued: answerBlockQueue.length,
                   });
+                }
+                if (started && !status.didJustFinish) {
+                  if (!status.playing && currentSpeech.phase === "playing") {
+                    log("playlistStatusUpdate: remote paused");
+                    isUserPaused = true;
+                    isUserPausedState = true;
+                    setSpeech({
+                      ...currentSpeech,
+                      phase: "paused",
+                    });
+                  } else if (status.playing && currentSpeech.phase === "paused") {
+                    log("playlistStatusUpdate: remote resumed");
+                    isUserPaused = false;
+                    isUserPausedState = false;
+                    setSpeech({
+                      ...currentSpeech,
+                      phase: "playing",
+                    });
+                  }
                 }
                 if (status.didJustFinish && streamDone) {
                   clearTimeout(startWatchdog);
-                  releasePlaylist();
-                  cleanupActiveSegments();
-                  log("stream consumer: finished all segments, queue:", readQueue.length);
-                  if (item.source === "auto" || readQueue.length > 0) {
-                    playNextFromQueue();
-                  } else {
-                    setSpeech(IDLE);
-                  }
+                  log("stream consumer: finished all segments, queued:", answerBlockQueue.length);
+                  finishCurrentAnswerBlock();
                 }
               });
 
@@ -760,13 +1396,13 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
                 projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
                 phase: "loading",
                 source: item.source,
-                queued: readQueue.length,
+                queued: answerBlockQueue.length,
               });
 
               pl.play();
             } else {
               playlist.add({ uri: segmentUri });
-              if (!playlist.playing) {
+              if (!playlist.playing && !isUserPaused && !isUserPausedState) {
                 playlist.play();
               }
             }
@@ -778,13 +1414,8 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
 
           // If the last track finished before the stream completion was marked
           if (playlist?.currentStatus?.didJustFinish) {
-            releasePlaylist();
-            cleanupActiveSegments();
-            if (item.source === "auto" || readQueue.length > 0) {
-              playNextFromQueue();
-            } else {
-              setSpeech(IDLE);
-            }
+            log("stream consumer: didJustFinish on stream completion");
+            finishCurrentAnswerBlock();
           }
         } catch (error) {
           clearTimeout(startWatchdog);
@@ -802,177 +1433,237 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
     [deviceTtsConfig, speakWithNativeFallback],
   );
 
-  const speak = useCallback(
-    (item: {
-      readonly key: string;
-      readonly text: string;
-      readonly threadId?: string;
-      readonly environmentId?: EnvironmentId;
-      readonly title?: string;
-      readonly projectTitle?: string;
-    }) => {
-      if (deviceTtsConfig && activeStreamAbort !== null && currentSpeech.key === item.key) {
-        log("speak: ignored, this reply is already streaming");
-        return;
-      }
-      stopCurrent();
-      const cleanedText = cleanTextForSpeech(item.text);
-      if (cleanedText.length === 0) {
-        log("speak: ignored, text is empty after sanitization");
-        return;
-      }
-      speakStartedAt = Date.now();
-      const resolvedEnvId =
-        item.environmentId ?? environmentId ?? currentSpeech.environmentId ?? null;
-      if (resolvedEnvId) {
-        activeSpeechEnvironmentId = resolvedEnvId;
-      }
-      const projectTitle = resolveProjectTitle({
-        environmentId: resolvedEnvId,
-        threadId: item.threadId,
-        projectTitle: item.projectTitle,
-      });
-      const textToSpeak = prefixTextWithProject(cleanedText, {
-        environmentId: resolvedEnvId,
-        threadId: item.threadId,
-        projectTitle,
-      });
-      if (deviceTtsConfig) {
-        log("speak: device Gemini stream", `${textToSpeak.length} chars`);
+  const playClip = useCallback(
+    async (chunkItem: ReadItem, isCurrent: () => boolean) => {
+      await ensureAudioSession();
+      if (!isCurrent()) return;
+
+      try {
+        let clipUri: string | null;
+        if (chunkItem.clipUri) {
+          clipUri = chunkItem.clipUri;
+        } else {
+          const result = await Promise.race([
+            ttsSynthesize({
+              environmentId: (chunkItem.environmentId ?? environmentId) as EnvironmentId,
+              input: { text: chunkItem.text },
+            }),
+            new Promise<never>((_, reject) => {
+              setTimeout(
+                () =>
+                  reject(
+                    new Error("The server did not answer. Check the connection and try again."),
+                  ),
+                SYNTHESIZE_TIMEOUT_MS,
+              );
+            }),
+          ]);
+          if (!isCurrent()) return;
+          if (result._tag !== "Success") {
+            if (await speakWithNativeFallback(chunkItem, isCurrent)) return;
+            announceExhausted(
+              "The server could not synthesize this reply. Check the read-aloud settings on your Mac.",
+            );
+            return;
+          }
+          clipUri =
+            httpBaseUrl === null ? null : resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
+          if (clipUri === null) {
+            if (await speakWithNativeFallback(chunkItem, isCurrent)) return;
+            announceExhausted("The reply clip could not be loaded. Reconnect and try again.");
+            return;
+          }
+          const clipFile = await File.downloadFileAsync(clipUri, new Directory(Paths.cache), {
+            idempotent: true,
+          });
+          clipUri = clipFile.uri;
+        }
+        if (!isCurrent()) return;
+
+        const clipPlaylist = (() => {
+          try {
+            return createAudioPlaylist({ sources: [{ uri: clipUri }] });
+          } catch (error) {
+            log("playlist: createAudioPlaylist FAILED", error, clipUri);
+            throw error;
+          }
+        })();
+
+        if (T3NativeControls?.pauseWaitingAudio) {
+          try {
+            void T3NativeControls.pauseWaitingAudio();
+          } catch {}
+        }
+        log(
+          "playlist: created",
+          chunkItem.clipUri ? "device segment" : "server clip",
+          `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
+          clipUri,
+        );
+        playlist = clipPlaylist;
+        try {
+          clipPlaylist.setActiveForLockScreen(
+            true,
+            {
+              title: chunkItem.title ?? "Antwort",
+              artist: chunkItem.projectTitle ? `T3 Code · ${chunkItem.projectTitle}` : "T3 Code",
+            },
+            {
+              showPreviousTrack: true,
+              showNextTrack: true,
+              showSeekForward: true,
+              showSeekBackward: true,
+            },
+          );
+        } catch {}
+
+        let started = false;
+
+        const startWatchdog = setTimeout(() => {
+          if (started || !isCurrent()) return;
+          releasePlaylist();
+          void (async () => {
+            if (await speakWithNativeFallback(chunkItem, isCurrent)) return;
+            announceExhausted("The reply clip did not start playing.");
+          })();
+        }, START_WATCHDOG_MS);
+
+        playlistSubscription = clipPlaylist.addListener("playlistStatusUpdate", (status) => {
+          if (!isCurrent()) return;
+          if (!started && status.isLoaded) clipPlaylist.play();
+          if (status.playing && !started) {
+            started = true;
+            clearTimeout(startWatchdog);
+            log(
+              "playlist: PLAYING",
+              `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
+              "queued:",
+              answerBlockQueue.length,
+            );
+            setSpeech({
+              key: chunkItem.key,
+              threadId: chunkItem.threadId ?? currentSpeech.threadId,
+              environmentId: chunkItem.environmentId ?? currentSpeech.environmentId,
+              title: chunkItem.title ?? currentSpeech.title,
+              projectTitle: chunkItem.projectTitle ?? currentSpeech.projectTitle,
+              phase: "playing",
+              source: chunkItem.source,
+              queued: answerBlockQueue.length,
+            });
+          }
+          if (started && !status.didJustFinish) {
+            if (!status.playing && currentSpeech.phase === "playing") {
+              log("playlistStatusUpdate (clip): remote paused");
+              setSpeech({
+                ...currentSpeech,
+                phase: "paused",
+              });
+            } else if (status.playing && currentSpeech.phase === "paused") {
+              log("playlistStatusUpdate (clip): remote resumed");
+              setSpeech({
+                ...currentSpeech,
+                phase: "playing",
+              });
+            }
+          }
+          if (status.didJustFinish) {
+            clearTimeout(startWatchdog);
+            releasePlaylist();
+            log(
+              "playlist: finished chunk, remaining in current block:",
+              currentBlockChunks.length,
+              "queued blocks:",
+              answerBlockQueue.length,
+            );
+            if (currentBlockChunks.length > 0) {
+              const nextChunk = currentBlockChunks.shift()!;
+              void playClip(nextChunk, isCurrent);
+            } else {
+              finishCurrentAnswerBlock();
+            }
+          }
+        });
+
         setSpeech({
-          key: item.key,
-          threadId: item.threadId ?? null,
-          environmentId: resolvedEnvId,
-          title: item.title ?? null,
-          projectTitle,
+          key: chunkItem.key,
+          threadId: chunkItem.threadId ?? currentSpeech.threadId,
+          environmentId: chunkItem.environmentId ?? currentSpeech.environmentId,
+          title: chunkItem.title ?? currentSpeech.title,
+          projectTitle: chunkItem.projectTitle ?? currentSpeech.projectTitle,
           phase: "loading",
-          source: "manual",
-          queued: readQueue.length,
+          source: chunkItem.source,
+          queued: answerBlockQueue.length,
         });
-        consumeDeviceStream({
-          key: item.key,
-          text: textToSpeak,
-          source: "manual",
-          threadId: item.threadId,
-          environmentId: resolvedEnvId ?? undefined,
-          title: item.title,
-          projectTitle,
-        });
-        return;
-      }
-      log("speak: server path", `${textToSpeak.length} chars`, "chunked:", chunkedPlayback);
-      const chunks = chunkedPlayback ? chunkReply(textToSpeak) : [textToSpeak];
-      const lead = chunks[0];
-      if (lead === undefined) return;
-      setSpeech({
-        key: item.key,
-        threadId: item.threadId ?? null,
-        environmentId: resolvedEnvId,
-        title: item.title ?? null,
-        projectTitle,
-        phase: "loading",
-        source: "manual",
-        queued: readQueue.length,
-      });
-      playThroughCurrentDeps?.({
-        key: item.key,
-        text: lead,
-        source: "manual",
-        threadId: item.threadId,
-        environmentId: resolvedEnvId ?? undefined,
-        title: item.title,
-        projectTitle,
-      });
-      for (let index = 1; index < chunks.length; index++) {
-        const text = chunks[index];
-        if (text === undefined) continue;
-        readQueue.push({
-          key: item.key,
-          dedupeKey: `${item.key}#${index}`,
-          text,
-          source: "auto",
-          threadId: item.threadId,
-          environmentId: resolvedEnvId ?? undefined,
-          title: item.title,
-          projectTitle,
-        });
+        clipPlaylist.play();
+      } catch (error) {
+        if (!isCurrent()) return;
+        log("playlist: failed", error);
+        if (await speakWithNativeFallback(chunkItem, isCurrent)) return;
+        announceExhausted(
+          error instanceof Error && error.message.length > 0
+            ? error.message
+            : "The server did not answer. Check the connection and try again.",
+        );
       }
     },
-    [consumeDeviceStream, deviceTtsConfig, environmentId],
+    [environmentId, httpBaseUrl, speakWithNativeFallback, ttsSynthesize],
   );
 
-  const pause = useCallback(() => {
-    if (T3NativeControls?.pauseSpeaking && currentSpeech.phase === "playing") {
-      try {
-        void T3NativeControls.pauseSpeaking();
-      } catch (e) {
-        log("native pause: failed", e);
+  const playServerOrClipBlock = useCallback(
+    (item: ReadItem, isCurrent: () => boolean) => {
+      if (httpBaseUrl === null && !deviceTtsConfig && !item.clipUri) {
+        void (async () => {
+          if (await speakWithNativeFallback(item, isCurrent)) return;
+          announceExhausted("This environment is not connected right now.");
+        })();
+        return;
       }
-      setSpeech({
-        ...currentSpeech,
-        phase: "paused",
-      });
-      return;
-    }
-    if (playlist && (currentSpeech.phase === "playing" || currentSpeech.phase === "loading")) {
-      try {
-        playlist.pause();
-      } catch (e) {
-        log("pause: failed", e);
-      }
-      setSpeech({
-        ...currentSpeech,
-        phase: "paused",
-      });
-    }
-  }, []);
 
-  const resume = useCallback(() => {
-    if (T3NativeControls?.resumeSpeaking && currentSpeech.phase === "paused") {
-      try {
-        void T3NativeControls.resumeSpeaking();
-      } catch (e) {
-        log("native resume: failed", e);
+      if (item.clipUri) {
+        void playClip(item, isCurrent);
+        return;
       }
-      setSpeech({
-        ...currentSpeech,
-        phase: "playing",
-      });
-      return;
-    }
-    if (playlist && currentSpeech.phase === "paused") {
-      try {
-        playlist.play();
-      } catch (e) {
-        log("resume: failed", e);
-      }
-      setSpeech({
-        ...currentSpeech,
-        phase: "playing",
-      });
-    }
-  }, []);
 
-  const seekBy = useCallback((deltaSeconds: number) => {
-    if (playlist) {
-      try {
-        const pl = playlist as unknown as {
-          currentTime?: number;
-          currentStatus?: { currentTime?: number };
-          seekTo?: (seconds: number) => Promise<void>;
-        };
-        const current = pl.currentTime ?? pl.currentStatus?.currentTime ?? 0;
-        const target = Math.max(0, current + deltaSeconds);
-        void pl.seekTo?.(target);
-      } catch (e) {
-        log("seekBy: failed", e);
+      const chunks = chunkedPlayback ? chunkReply(item.text) : [item.text];
+      const lead = chunks[0];
+      if (lead === undefined) {
+        finishCurrentAnswerBlock();
+        return;
       }
-    }
-  }, []);
 
-  const stop = useCallback(() => {
-    stopCurrent();
-  }, []);
+      currentBlockChunks = chunks.slice(1).map((text, idx) => ({
+        ...item,
+        text,
+        dedupeKey: `${item.key}#${idx + 1}`,
+      }));
+
+      void playClip({ ...item, text: lead }, isCurrent);
+    },
+    [deviceTtsConfig, httpBaseUrl, playClip, speakWithNativeFallback],
+  );
+
+  const speak = useCallback(
+    (
+      item: {
+        readonly key: string;
+        readonly text: string;
+        readonly threadId?: string;
+        readonly environmentId?: EnvironmentId;
+        readonly title?: string;
+        readonly projectTitle?: string;
+      },
+      options?: { readonly forceImmediate?: boolean },
+    ) => {
+      enqueueAnswerBlock(
+        {
+          ...item,
+          source: "manual",
+        },
+        { forceImmediate: options?.forceImmediate ?? true },
+      );
+    },
+    [],
+  );
 
   const enqueue = useCallback(
     (item: {
@@ -984,225 +1675,133 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
       readonly title?: string;
       readonly projectTitle?: string;
     }) => {
-      const resolvedEnvId = item.environmentId ?? environmentId ?? null;
-      if (resolvedEnvId) activeSpeechEnvironmentId = resolvedEnvId;
-      const projectTitle = resolveProjectTitle({
-        environmentId: resolvedEnvId,
-        threadId: item.threadId,
-        projectTitle: item.projectTitle,
-      });
-      const cleanedText = item.clipUri ? item.text : cleanTextForSpeech(item.text);
-      if (!item.clipUri && cleanedText.length === 0) return;
-      const textToQueue = item.clipUri
-        ? cleanedText
-        : prefixTextWithProject(cleanedText, {
-            environmentId: resolvedEnvId,
-            threadId: item.threadId,
-            projectTitle,
-          });
-      enqueueCounter += 1;
-      const dedupeKey = `${item.key}#${enqueueCounter}`;
-      readQueue.push({
-        key: item.key,
-        dedupeKey,
-        text: textToQueue,
+      enqueueAnswerBlock({
+        ...item,
         source: "auto",
-        clipUri: item.clipUri,
-        threadId: item.threadId,
-        environmentId: resolvedEnvId ?? undefined,
-        title: item.title,
-        projectTitle,
       });
-      if (currentSpeech.phase === null) {
-        playNextFromQueue();
-      } else {
-        setSpeech({ ...currentSpeech, queued: readQueue.length });
-      }
     },
-    [environmentId],
+    [],
   );
 
+  const pause = useCallback(() => {
+    log("pause called, currentSpeech:", currentSpeech);
+    isUserPausedState = true;
+    if (playlist) {
+      try {
+        playlist.pause();
+      } catch (e) {
+        log("pause: playlist.pause() failed", e);
+      }
+    }
+    if (T3NativeControls?.pauseSpeaking) {
+      try {
+        void T3NativeControls.pauseSpeaking();
+      } catch (e) {}
+    }
+    if (T3NativeControls?.pauseWaitingAudio) {
+      try {
+        void T3NativeControls.pauseWaitingAudio();
+      } catch (e) {}
+    }
+    setSpeech({ ...currentSpeech, phase: "paused" });
+  }, []);
+
+  const resume = useCallback(() => {
+    log("resume called, currentSpeech:", currentSpeech);
+    isUserPausedState = false;
+    if (playlist) {
+      try {
+        playlist.play();
+        setSpeech({ ...currentSpeech, phase: "playing" });
+        if (T3NativeControls?.resumeSpeaking) {
+          try {
+            void T3NativeControls.resumeSpeaking();
+          } catch {}
+        }
+        return;
+      } catch (e) {
+        log("resume: playlist.play() failed", e);
+      }
+    }
+    if (isAudioSessionActive) {
+      if (T3NativeControls?.resumeWaitingAudio) {
+        try {
+          void T3NativeControls.resumeWaitingAudio({
+            projectTitle: currentSpeech.projectTitle ?? activeAudioSessionTarget?.projectTitle,
+            title: "Warte auf Antwort...",
+          });
+        } catch (e) {}
+      } else if (T3NativeControls?.resumeSpeaking) {
+        try {
+          void T3NativeControls.resumeSpeaking();
+        } catch (e) {}
+      }
+      setSpeech({ ...currentSpeech, phase: null });
+      return;
+    }
+    if (T3NativeControls?.resumeSpeaking && currentSpeech.phase === "paused") {
+      try {
+        void T3NativeControls.resumeSpeaking();
+      } catch (e) {}
+      setSpeech({ ...currentSpeech, phase: "playing" });
+      return;
+    }
+  }, []);
+
+  const seekBy = useCallback((deltaSeconds: number) => {
+    if (playlist) {
+      try {
+        const pl = playlist as unknown as {
+          currentTime?: number;
+          currentIndex?: number;
+          trackCount?: number;
+          currentStatus?: { currentTime?: number; currentIndex?: number };
+          seekTo?: (seconds: number) => Promise<void>;
+          skipTo?: (index: number) => void;
+          previous?: () => void;
+        };
+        const current = pl.currentTime ?? pl.currentStatus?.currentTime ?? 0;
+        const target = current + deltaSeconds;
+        if (target < 0) {
+          const currentIndex = pl.currentIndex ?? pl.currentStatus?.currentIndex ?? 0;
+          if (currentIndex > 0) {
+            pl.skipTo?.(currentIndex - 1);
+          } else {
+            void pl.seekTo?.(0);
+          }
+        } else {
+          void pl.seekTo?.(target);
+        }
+      } catch (e) {
+        log("seekBy: failed", e);
+      }
+    }
+  }, []);
+
+  const stop = useCallback(() => {
+    stopCurrent();
+  }, []);
+
   useEffect(() => {
+    activeStartAnswerBlock = (item: ReadItem, isCurrent: () => boolean) => {
+      if (deviceTtsConfig && !item.clipUri) {
+        consumeDeviceStream(item, isCurrent);
+      } else {
+        playServerOrClipBlock(item, isCurrent);
+      }
+    };
     playThroughCurrentDeps = (item: ReadItem) => {
       const run = ++runCounter;
       const isCurrent = () => run === runCounter;
-      const resolvedEnvId =
-        item.environmentId ?? environmentId ?? activeSpeechEnvironmentId ?? null;
-      if (resolvedEnvId) activeSpeechEnvironmentId = resolvedEnvId;
-      setSpeech({
-        ...IDLE,
-        phase: "loading",
-        key: item.key,
-        threadId: item.threadId ?? currentSpeech.threadId,
-        environmentId: resolvedEnvId,
-        title: item.title ?? currentSpeech.title,
-        projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
-        queued: readQueue.length,
-      });
-
-      if (httpBaseUrl === null && !deviceTtsConfig) {
-        void (async () => {
-          if (await speakWithNativeFallback(item, isCurrent)) return;
-          announceExhausted("This environment is not connected right now.");
-        })();
-        return;
+      if (deviceTtsConfig && !item.clipUri) {
+        consumeDeviceStream(item, isCurrent);
+      } else {
+        playServerOrClipBlock(item, isCurrent);
       }
-
-      if (!item.clipUri && deviceTtsConfig) {
-        consumeDeviceStream(item);
-        return;
-      }
-
-      const startPlayback = async () => {
-        await ensureAudioSession();
-        if (!isCurrent()) return;
-
-        try {
-          let clipUri: string | null;
-          if (item.clipUri) {
-            clipUri = item.clipUri;
-          } else {
-            const result = await Promise.race([
-              ttsSynthesize({
-                environmentId: resolvedEnvId ?? (environmentId as EnvironmentId),
-                input: { text: item.text },
-              }),
-              new Promise<never>((_, reject) => {
-                setTimeout(
-                  () =>
-                    reject(
-                      new Error("The server did not answer. Check the connection and try again."),
-                    ),
-                  SYNTHESIZE_TIMEOUT_MS,
-                );
-              }),
-            ]);
-            if (!isCurrent()) return;
-            if (result._tag !== "Success") {
-              if (await speakWithNativeFallback(item, isCurrent)) return;
-              announceExhausted(
-                "The server could not synthesize this reply. Check the read-aloud settings on your Mac.",
-              );
-              return;
-            }
-            clipUri =
-              httpBaseUrl === null ? null : resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
-            if (clipUri === null) {
-              if (await speakWithNativeFallback(item, isCurrent)) return;
-              announceExhausted("The reply clip could not be loaded. Reconnect and try again.");
-              return;
-            }
-            const clipFile = await File.downloadFileAsync(clipUri, new Directory(Paths.cache), {
-              idempotent: true,
-            });
-            clipUri = clipFile.uri;
-          }
-          if (!isCurrent()) return;
-
-          const clipPlaylist = (() => {
-            try {
-              return createAudioPlaylist({ sources: [{ uri: clipUri }] });
-            } catch (error) {
-              log("playlist: createAudioPlaylist FAILED", error, clipUri);
-              throw error;
-            }
-          })();
-
-          log(
-            "playlist: created",
-            item.clipUri ? "device segment" : "server clip",
-            `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
-            clipUri,
-          );
-          playlist = clipPlaylist;
-          try {
-            clipPlaylist.setActiveForLockScreen(true, {
-              title: item.title ?? "Antwort",
-              artist: item.projectTitle ? `T3 Code · ${item.projectTitle}` : "T3 Code",
-            });
-          } catch {}
-
-          let started = false;
-
-          const startWatchdog = setTimeout(() => {
-            if (started || !isCurrent()) return;
-            releasePlaylist();
-            void (async () => {
-              if (await speakWithNativeFallback(item, isCurrent)) return;
-              announceExhausted("The reply clip did not start playing.");
-            })();
-          }, START_WATCHDOG_MS);
-
-          playlistSubscription = clipPlaylist.addListener("playlistStatusUpdate", (status) => {
-            if (!isCurrent()) return;
-            if (!started && status.isLoaded) clipPlaylist.play();
-            if (status.playing && !started) {
-              started = true;
-              clearTimeout(startWatchdog);
-              log(
-                "playlist: PLAYING",
-                `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
-                "queued:",
-                readQueue.length,
-              );
-              setSpeech({
-                key: item.key,
-                threadId: item.threadId ?? currentSpeech.threadId,
-                environmentId: item.environmentId ?? currentSpeech.environmentId,
-                title: item.title ?? currentSpeech.title,
-                projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
-                phase: "playing",
-                source: item.source,
-                queued: readQueue.length,
-              });
-            }
-            if (status.didJustFinish) {
-              clearTimeout(startWatchdog);
-              releasePlaylist();
-              log("playlist: finished segment, queue:", readQueue.length);
-              if (item.source === "auto" || readQueue.length > 0) {
-                playNextFromQueue();
-              } else {
-                cleanupActiveSegments();
-                setSpeech(IDLE);
-              }
-            }
-          });
-
-          setSpeech({
-            key: item.key,
-            threadId: item.threadId ?? currentSpeech.threadId,
-            environmentId: item.environmentId ?? currentSpeech.environmentId,
-            title: item.title ?? currentSpeech.title,
-            projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
-            phase: "loading",
-            source: item.source,
-            queued: readQueue.length,
-          });
-          clipPlaylist.play();
-        } catch (error) {
-          if (!isCurrent()) return;
-          log("playlist: failed", error);
-          if (await speakWithNativeFallback(item, isCurrent)) return;
-          announceExhausted(
-            error instanceof Error && error.message.length > 0
-              ? error.message
-              : "The server did not answer. Check the connection and try again.",
-          );
-        }
-      };
-      void startPlayback();
     };
-  }, [
-    consumeDeviceStream,
-    deviceTtsConfig,
-    environmentId,
-    httpBaseUrl,
-    speakWithNativeFallback,
-    ttsSynthesize,
-  ]);
+  }, [consumeDeviceStream, deviceTtsConfig, playServerOrClipBlock]);
 
-  return { speech, speak, pause, resume, seekBy, stop, enqueue };
+  return { speech, speak, pause, resume, seekBy, stop, enqueue, skipNext: skipToNextBlock };
 }
 
 function isMessageEntry(entry: unknown): entry is ThreadFeedMessageEntry {
@@ -1289,15 +1888,16 @@ export function useReadAloudAutoAnnounce(input: {
     }
 
     if (newlyFinished.length > 0) {
-      if (isReadAloudArmedOnNextReply(threadId)) {
+      if (isAudioSessionActive || isReadAloudArmedOnNextReply(threadId)) {
         const armed = armedTargets.get(threadId);
-        disarmReadAloudOnNextReply(threadId);
-        const lastItem = newlyFinished[newlyFinished.length - 1];
-        if (lastItem) {
-          const textToSpeak = turnTexts?.get(lastItem.key) ?? lastItem.text;
+        if (!isAudioSessionActive) {
+          disarmReadAloudOnNextReply(threadId);
+        }
+        for (const item of newlyFinished) {
+          const textToSpeak = turnTexts?.get(item.key) ?? item.text;
           const resolvedProject = armed?.projectTitle ?? projectTitle;
-          speak({
-            key: lastItem.key,
+          enqueue({
+            key: item.key,
             text: textToSpeak,
             threadId,
             environmentId,

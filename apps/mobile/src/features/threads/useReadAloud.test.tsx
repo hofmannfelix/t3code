@@ -3,6 +3,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { savePreferencesPatch } from "../../persistence/imperative";
 
 type ClipStatus = {
   readonly isLoaded?: boolean;
@@ -118,12 +119,32 @@ vi.mock("expo-audio", () => ({
 }));
 vi.mock("expo", () => ({
   requireOptionalNativeModule: () => null,
+  requireNativeModule: () => ({}),
+}));
+vi.mock("../../persistence/imperative", () => ({
+  savePreferencesPatch: vi.fn(async () => ({})),
 }));
 vi.mock("react-native", () => ({
   Platform: { OS: "ios" },
   Alert: {
     alert: (title: string, message?: string) =>
       harness.alerts.push({ title, message: message ?? "" }),
+  },
+}));
+vi.mock("../../state/threads", () => ({
+  environmentThreadShells: {
+    navigationThreadShellsAtom: { _tag: "navigationThreadShellsAtom" },
+  },
+}));
+vi.mock("../../state/projects", () => ({
+  environmentProjects: {
+    projectAtom: () => ({ _tag: "projectAtom" }),
+  },
+}));
+vi.mock("../../state/atom-registry", () => ({
+  appAtomRegistry: {
+    get: () => [],
+    subscribe: () => () => {},
   },
 }));
 vi.mock("../../state/session", () => ({
@@ -191,7 +212,15 @@ import {
   isReadAloudArmedOnNextReply,
   useIsThreadReadAloudArmed,
   useThreadAudioMode,
+  isGlobalAudioSessionActive,
+  startGlobalAudioSession,
+  stopGlobalAudioSession,
+  useIsAudioSessionActive,
+  useIsAudioBarVisible,
+  pauseAudioForVoiceRecording,
+  resumeAudioAfterVoiceRecording,
   SYNTHESIZE_TIMEOUT_MS,
+  stopAllSpeech,
   useReadAloud,
   useReadAloudAutoAnnounce,
 } from "./useReadAloud";
@@ -222,6 +251,7 @@ function renderReadAloud() {
     resume: () => current.resume,
     seekBy: () => current.seekBy,
     stop: () => current.stop,
+    enqueue: () => current.enqueue,
   };
 }
 
@@ -258,6 +288,7 @@ describe("useReadAloud", () => {
     harness.ttsSynthesize.mockClear();
     harness.setAudioModeAsync.mockClear();
     harness.setIsAudioActiveAsync.mockClear();
+    stopAllSpeech();
   });
 
   afterEach(() => {
@@ -495,6 +526,84 @@ describe("useReadAloud", () => {
     expect(pl.release).toHaveBeenCalled();
     expect(view.speech()).toMatchObject({ key: null, phase: null, queued: 0 });
   });
+
+  it("queues complete answer blocks across multiple threads in strict FIFO order without interleaving snippets", async () => {
+    const view = renderReadAloud();
+
+    // 1. Thread A starts with a two-sentence reply
+    await act(async () => {
+      view.enqueue()({
+        key: "msg-thread-a",
+        text: "Sentence A1. Sentence A2.",
+        threadId: "thread-a",
+      });
+    });
+    await flush();
+
+    // Lead chunk of Thread A synthesizes and loads
+    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(1);
+    expect(normalize(spokenTexts()[0]!)).toBe("Thread T3 Code: Sentence A1.");
+    expect(view.speech()).toMatchObject({ key: "msg-thread-a", phase: "loading", queued: 0 });
+
+    harness.players[0]!.emit({ isLoaded: true });
+    act(() => {
+      harness.players[0]!.emit({ playing: true });
+    });
+    expect(view.speech()).toMatchObject({ key: "msg-thread-a", phase: "playing", queued: 0 });
+
+    // 2. While Thread A is playing, Thread B finishes and enqueues its reply
+    await act(async () => {
+      view.enqueue()({
+        key: "msg-thread-b",
+        text: "Sentence B1. Sentence B2.",
+        threadId: "thread-b",
+      });
+    });
+    await flush();
+
+    // Thread B is queued as a full answer block (queued = 1), NOT mixed into Thread A
+    expect(view.speech()).toMatchObject({ key: "msg-thread-a", phase: "playing", queued: 1 });
+    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(1);
+
+    // 3. Thread A finishes chunk 1 -> Thread A continues with chunk 2
+    act(() => {
+      harness.players[0]!.emit({ didJustFinish: true });
+    });
+    await flush();
+
+    // Second chunk of Thread A synthesizes next (NOT Thread B!)
+    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(2);
+    expect(normalize(spokenTexts()[1]!)).toBe("Sentence A2.");
+    expect(view.speech()).toMatchObject({ key: "msg-thread-a", queued: 1 });
+
+    // 4. Thread A finishes chunk 2 -> Thread A complete!
+    act(() => {
+      harness.players[1]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
+    });
+    await flush();
+
+    // 5. Thread B starts from the FIFO queue as the next full answer block
+    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(3);
+    expect(normalize(spokenTexts()[2]!)).toBe("Thread T3 Code: Sentence B1.");
+    expect(view.speech()).toMatchObject({ key: "msg-thread-b", queued: 0 });
+
+    // 6. Thread B finishes chunk 1 -> Thread B plays chunk 2
+    act(() => {
+      harness.players[2]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
+    });
+    await flush();
+
+    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(4);
+    expect(normalize(spokenTexts()[3]!)).toBe("Sentence B2.");
+
+    // 7. Thread B finishes chunk 2 -> Queue drained completely, returns to idle
+    act(() => {
+      harness.players[3]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
+    });
+    await flush();
+
+    expect(view.speech()).toMatchObject({ key: null, phase: null, queued: 0 });
+  });
 });
 
 function renderAutoAnnounce(initialProps: {
@@ -542,6 +651,7 @@ function renderAutoAnnounce(initialProps: {
 
 describe("useReadAloudAutoAnnounce", () => {
   beforeEach(() => {
+    stopAllSpeech();
     roots = [];
     harness.playlists.length = 0;
     harness.alerts.length = 0;
@@ -874,5 +984,187 @@ describe("useReadAloudAutoAnnounce", () => {
     expect(modeHandle!.isActive).toBe(false);
     expect(modeHandle!.isArmed).toBe(false);
     expect(isReadAloudArmedOnNextReply("mode-thread-1")).toBe(false);
+  });
+
+  it("updates speech phase when remote control pauses or resumes playback", async () => {
+    const view = renderReadAloud();
+    act(() => {
+      view.speak()({
+        key: "msg-remote-sync",
+        text: "Remote playback test.",
+      });
+    });
+    await flush();
+
+    const pl = harness.players[0]!;
+    expect(pl.play).toHaveBeenCalled();
+    act(() => {
+      pl.emit({ isLoaded: true, playing: true });
+    });
+    expect(view.speech().phase).toBe("playing");
+
+    // Remote pause (e.g. Lock screen / AirPods / Control Center)
+    act(() => {
+      pl.emit({ playing: false });
+    });
+    expect(view.speech().phase).toBe("paused");
+
+    // Remote resume
+    act(() => {
+      pl.emit({ playing: true });
+    });
+    expect(view.speech().phase).toBe("playing");
+
+    // Cleanup
+    act(() => {
+      view.stop()();
+    });
+    await flush();
+  });
+
+  it("persists global audio session state across speech completion until explicitly stopped", async () => {
+    let sessionActive = false;
+    function ActiveComponent() {
+      sessionActive = useIsAudioSessionActive();
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+
+    act(() => {
+      root.render(<ActiveComponent />);
+    });
+    expect(sessionActive).toBe(false);
+    expect(isGlobalAudioSessionActive()).toBe(false);
+
+    // Start global session
+    await act(async () => {
+      await startGlobalAudioSession({ threadId: "thread-persistent" });
+    });
+    expect(sessionActive).toBe(true);
+    expect(isGlobalAudioSessionActive()).toBe(true);
+
+    // Speak a message
+    const view = renderReadAloud();
+    act(() => {
+      view.speak()({
+        key: "msg-persisted",
+        text: "Persisted speech.",
+        threadId: "thread-persistent",
+      });
+    });
+    await flush();
+
+    const pl = harness.players[0]!;
+    act(() => {
+      pl.emit({ isLoaded: true, playing: true });
+    });
+    expect(view.speech().phase).toBe("playing");
+
+    // Message finishes playing
+    act(() => {
+      pl.emit({ didJustFinish: true, playing: false });
+    });
+    await flush();
+
+    // Speech is idle, but global session REMAINS ACTIVE!
+    expect(view.speech().phase).toBe(null);
+    expect(sessionActive).toBe(true);
+    expect(isGlobalAudioSessionActive()).toBe(true);
+
+    // Explicitly stop global session
+    act(() => {
+      stopGlobalAudioSession();
+    });
+    expect(sessionActive).toBe(false);
+    expect(isGlobalAudioSessionActive()).toBe(false);
+  });
+
+  it("pauses speech during voice recording and resumes it afterwards", async () => {
+    const view = renderReadAloud();
+    act(() => {
+      view.speak()({
+        key: "msg-voice-pause",
+        text: "Testing pause during voice recording.",
+      });
+    });
+    await flush();
+
+    const pl = harness.players[0]!;
+    act(() => {
+      pl.emit({ isLoaded: true, playing: true });
+    });
+    expect(view.speech().phase).toBe("playing");
+
+    // Voice recording starts
+    act(() => {
+      pauseAudioForVoiceRecording();
+    });
+    expect(pl.pause).toHaveBeenCalled();
+    expect(view.speech().phase).toBe("paused");
+
+    // Voice recording ends
+    await act(async () => {
+      await resumeAudioAfterVoiceRecording();
+    });
+    expect(pl.play).toHaveBeenCalled();
+    expect(view.speech().phase).toBe("playing");
+
+    // Cleanup
+    act(() => {
+      view.stop()();
+    });
+    await flush();
+  });
+
+  it("persists audio session preference and reflects visibility in useIsAudioBarVisible", async () => {
+    let barVisible = false;
+    function BarVisibleWatcher() {
+      barVisible = useIsAudioBarVisible();
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+
+    act(() => {
+      root.render(<BarVisibleWatcher />);
+    });
+    expect(barVisible).toBe(false);
+
+    // Start global session
+    await act(async () => {
+      await startGlobalAudioSession({
+        threadId: "thread-persisted-1",
+        threadTitle: "My Thread",
+        projectTitle: "My Project",
+      });
+    });
+    expect(barVisible).toBe(true);
+    expect(savePreferencesPatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        audioSessionActive: true,
+        audioSessionTarget: expect.objectContaining({
+          threadId: "thread-persisted-1",
+          threadTitle: "My Thread",
+          projectTitle: "My Project",
+        }),
+      }),
+    );
+
+    // Explicitly stop global session
+    act(() => {
+      stopGlobalAudioSession();
+    });
+    expect(barVisible).toBe(false);
+    expect(savePreferencesPatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        audioSessionActive: false,
+        audioSessionTarget: null,
+      }),
+    );
   });
 });
