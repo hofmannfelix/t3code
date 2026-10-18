@@ -274,7 +274,7 @@ describe("useReadAloud", () => {
     // The lead chunk starts synthesis and playback; the queue waits for it
     // instead of doubling up while the lead loads.
     expect(harness.ttsSynthesize).toHaveBeenCalledTimes(1);
-    expect(normalize(spokenTexts()[0]!)).toBe("One.");
+    expect(normalize(spokenTexts()[0]!)).toBe("Thread T3 Code: One.");
     expect(harness.players).toHaveLength(1);
     expect(harness.downloads[0]!.url).toBe("http://server.test:8923/api/tts-audio/token-1");
     expect(harness.players[0]!.uri).toBe("file:///cache/download-1.wav");
@@ -402,6 +402,26 @@ describe("useReadAloud", () => {
     });
     await flush();
     expect(view.speech()).toMatchObject({ key: null, phase: null });
+  });
+
+  it("prefixes spoken text with the resolved project title", async () => {
+    const view = renderReadAloud();
+    await act(async () => {
+      view.speak()({
+        key: "msg-project-1",
+        text: "Der Build ist fertig.",
+        projectTitle: "Super App",
+      });
+    });
+    await flush();
+
+    expect(normalize(spokenTexts()[0]!)).toBe("Thread Super App: Der Build ist fertig.");
+
+    act(() => {
+      harness.players[0]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
+    });
+    await flush();
+    expect(view.speech()).toMatchObject({ key: null, phase: null, queued: 0 });
   });
 
   it("stops cleanly while loading and does not keep the queue", async () => {

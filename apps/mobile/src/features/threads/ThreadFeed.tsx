@@ -284,6 +284,7 @@ export interface ThreadFeedProps {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly threadTitle: string;
+  readonly projectTitle?: string;
   readonly workspaceRoot?: string | null;
   readonly feed: ReadonlyArray<ThreadFeedEntry>;
   readonly contentPresentation: ThreadContentPresentation;
@@ -399,6 +400,7 @@ function ReadAloudButton(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId?: ThreadId;
   readonly threadTitle?: string;
+  readonly projectTitle?: string;
   readonly iconColor: ColorValue;
 }) {
   const { speech, speak, stop } = useReadAloud(props.environmentId);
@@ -420,6 +422,7 @@ function ReadAloudButton(props: {
             threadId: props.threadId ? String(props.threadId) : undefined,
             environmentId: props.environmentId,
             title: props.threadTitle,
+            projectTitle: props.projectTitle,
           });
       }}
       className="h-7 w-7 items-center justify-center"
@@ -1563,6 +1566,7 @@ function renderFeedEntry(
     | "dispatchingMessageId"
     | "onEditPendingMessage"
     | "threadId"
+    | "projectTitle"
     | "workspaceRoot"
   > & {
     readonly copiedRowId: string | null;
@@ -2014,6 +2018,7 @@ function renderFeedEntry(
               environmentId={props.environmentId}
               threadId={props.threadId}
               threadTitle={props.threadTitle}
+              projectTitle={props.projectTitle}
               iconColor={iconSubtleColor}
             />
             {message.projectedItem ? (
@@ -2277,6 +2282,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   useReadAloudAutoAnnounce({
     environmentId: props.environmentId,
     threadId: props.threadId,
+    threadTitle: props.threadTitle,
+    projectTitle: props.projectTitle,
     feed: props.feed,
     turnTexts: turnTextByMessageId,
   });
@@ -3093,6 +3100,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             onEditPendingMessage: props.onEditPendingMessage,
             onUseArtifactTemplate: props.onUseArtifactTemplate,
             threadId: props.threadId,
+            projectTitle: props.projectTitle,
             copiedRowId,
             expandedWorkRows,
             workRowSizing,

@@ -1,5 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
+import {
+  useChildThreadInputs,
+  useProject,
+  useThreadReportedModelSelection,
+} from "../../state/entities";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { useNavigation } from "@react-navigation/native";
 import type { WorktreeSetupCardProps } from "./worktree-setup-card";
@@ -324,6 +329,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const navigation = useNavigation();
   const { session: voiceInputSession } = useGlobalVoiceInput();
+  const project = useProject(scopeProjectRef(props.environmentId, props.selectedThread.projectId));
   const reportedModelSelection = useThreadReportedModelSelection({
     environmentId: props.environmentId,
     threadId: props.selectedThread.id,
@@ -1151,6 +1157,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             <ThreadFeed
               environmentId={props.environmentId}
               threadId={props.selectedThread.id}
+              projectTitle={project?.title ?? props.environmentLabel ?? "T3 Code"}
               workspaceRoot={props.threadCwd}
               feed={props.selectedThreadFeed}
               worktreeSetup={props.worktreeSetup}

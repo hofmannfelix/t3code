@@ -29,6 +29,7 @@ export interface ReadAloudSpeech {
   readonly threadId: string | null;
   readonly environmentId: EnvironmentId | null;
   readonly title: string | null;
+  readonly projectTitle: string | null;
   readonly phase: "loading" | "playing" | "paused" | null;
   readonly source: "manual" | "auto" | null;
   readonly queued: number;
@@ -41,6 +42,7 @@ interface ReadItem {
   readonly threadId?: string;
   readonly environmentId?: EnvironmentId;
   readonly title?: string;
+  readonly projectTitle?: string;
   /** Pre-rendered device clip; present skips synthesis and plays the file. */
   readonly clipUri?: string;
 }
@@ -67,6 +69,7 @@ const IDLE: ReadAloudSpeech = {
   threadId: null,
   environmentId: null,
   title: null,
+  projectTitle: null,
   phase: null,
   source: null,
   queued: 0,
@@ -110,6 +113,7 @@ export interface ArmedReadAloudTarget {
   readonly threadId: string;
   readonly environmentId: EnvironmentId | null;
   readonly threadTitle?: string;
+  readonly projectTitle?: string;
   readonly armedAt: number;
 }
 
@@ -122,8 +126,54 @@ const notifyArmedTargetListeners = () => {
   }
 };
 
+export function resolveProjectTitle(options: {
+  readonly environmentId?: EnvironmentId | null;
+  readonly threadId?: string | null;
+  readonly projectTitle?: string | null;
+}): string {
+  if (options.projectTitle && options.projectTitle.trim().length > 0) {
+    return options.projectTitle.trim();
+  }
+  if (options.threadId) {
+    const armed = armedTargets.get(options.threadId);
+    if (armed?.projectTitle && armed.projectTitle.trim().length > 0) {
+      return armed.projectTitle.trim();
+    }
+  }
+  return "T3 Code";
+}
+
+export function prefixTextWithProject(
+  text: string,
+  options: {
+    readonly environmentId?: EnvironmentId | null;
+    readonly threadId?: string | null;
+    readonly projectTitle?: string | null;
+  },
+): string {
+  const projectTitle = resolveProjectTitle(options);
+  const expectedPrefix = `Thread ${projectTitle}:`;
+  const trimmed = text.trim();
+  if (
+    trimmed.startsWith(expectedPrefix) ||
+    trimmed.startsWith(`Thread ${projectTitle}.`) ||
+    trimmed.toLowerCase().startsWith(`thread ${projectTitle.toLowerCase()}:`) ||
+    trimmed.toLowerCase().startsWith(`thread ${projectTitle.toLowerCase()}.`)
+  ) {
+    return text;
+  }
+  return `${expectedPrefix} ${trimmed}`;
+}
+
 export const armReadAloudOnNextReply = (
-  input: string | { threadId: string; environmentId?: EnvironmentId | null; threadTitle?: string },
+  input:
+    | string
+    | {
+        threadId: string;
+        environmentId?: EnvironmentId | null;
+        threadTitle?: string;
+        projectTitle?: string;
+      },
 ) => {
   const threadId = typeof input === "string" ? input : input.threadId;
   const environmentId =
@@ -131,11 +181,13 @@ export const armReadAloudOnNextReply = (
       ? (activeSpeechEnvironmentId ?? null)
       : (input.environmentId ?? activeSpeechEnvironmentId ?? null);
   const threadTitle = typeof input === "string" ? undefined : input.threadTitle;
+  const projectTitle = typeof input === "string" ? undefined : input.projectTitle;
 
   armedTargets.set(threadId, {
     threadId,
     environmentId,
     threadTitle,
+    projectTitle,
     armedAt: Date.now(),
   });
   notifyArmedTargetListeners();
@@ -206,7 +258,7 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
         {
           environmentId: speech.environmentId ? String(speech.environmentId) : "",
           threadId: speech.threadId ?? "",
-          projectTitle: "T3 Code",
+          projectTitle: speech.projectTitle || "T3 Code",
           threadTitle: speech.title || "Sprachausgabe",
           modelTitle: "",
           phase: "running" as const,
@@ -311,6 +363,7 @@ const playNextFromQueue = () => {
     threadId: next.threadId ?? currentSpeech.threadId,
     environmentId: next.environmentId ?? currentSpeech.environmentId,
     title: next.title ?? currentSpeech.title,
+    projectTitle: next.projectTitle ?? currentSpeech.projectTitle,
   });
   playThroughCurrentDeps(next);
 };
@@ -492,6 +545,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
                     threadId: item.threadId ?? currentSpeech.threadId,
                     environmentId: item.environmentId ?? currentSpeech.environmentId,
                     title: item.title ?? currentSpeech.title,
+                    projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
                     phase: "playing",
                     source: item.source,
                     queued: readQueue.length,
@@ -515,6 +569,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
                 threadId: item.threadId ?? currentSpeech.threadId,
                 environmentId: item.environmentId ?? currentSpeech.environmentId,
                 title: item.title ?? currentSpeech.title,
+                projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
                 phase: "loading",
                 source: item.source,
                 queued: readQueue.length,
@@ -565,6 +620,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
       readonly threadId?: string;
       readonly environmentId?: EnvironmentId;
       readonly title?: string;
+      readonly projectTitle?: string;
     }) => {
       if (deviceTtsConfig && activeStreamAbort !== null && currentSpeech.key === item.key) {
         log("speak: ignored, this reply is already streaming");
@@ -582,29 +638,41 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
       if (resolvedEnvId) {
         activeSpeechEnvironmentId = resolvedEnvId;
       }
+      const projectTitle = resolveProjectTitle({
+        environmentId: resolvedEnvId,
+        threadId: item.threadId,
+        projectTitle: item.projectTitle,
+      });
+      const textToSpeak = prefixTextWithProject(cleanedText, {
+        environmentId: resolvedEnvId,
+        threadId: item.threadId,
+        projectTitle,
+      });
       if (deviceTtsConfig) {
-        log("speak: device Gemini stream", `${item.text.length} chars`);
+        log("speak: device Gemini stream", `${textToSpeak.length} chars`);
         setSpeech({
           key: item.key,
           threadId: item.threadId ?? null,
           environmentId: resolvedEnvId,
           title: item.title ?? null,
+          projectTitle,
           phase: "loading",
           source: "manual",
           queued: readQueue.length,
         });
         consumeDeviceStream({
           key: item.key,
-          text: cleanedText,
+          text: textToSpeak,
           source: "manual",
           threadId: item.threadId,
           environmentId: resolvedEnvId ?? undefined,
           title: item.title,
+          projectTitle,
         });
         return;
       }
-      log("speak: server path", `${item.text.length} chars`, "chunked:", chunkedPlayback);
-      const chunks = chunkedPlayback ? chunkReply(cleanedText) : [cleanedText];
+      log("speak: server path", `${textToSpeak.length} chars`, "chunked:", chunkedPlayback);
+      const chunks = chunkedPlayback ? chunkReply(textToSpeak) : [textToSpeak];
       const lead = chunks[0];
       if (lead === undefined) return;
       setSpeech({
@@ -612,6 +680,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         threadId: item.threadId ?? null,
         environmentId: resolvedEnvId,
         title: item.title ?? null,
+        projectTitle,
         phase: "loading",
         source: "manual",
         queued: readQueue.length,
@@ -623,6 +692,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         threadId: item.threadId,
         environmentId: resolvedEnvId ?? undefined,
         title: item.title,
+        projectTitle,
       });
       for (let index = 1; index < chunks.length; index++) {
         const text = chunks[index];
@@ -635,6 +705,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
           threadId: item.threadId,
           environmentId: resolvedEnvId ?? undefined,
           title: item.title,
+          projectTitle,
         });
       }
     },
@@ -698,22 +769,36 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
       readonly threadId?: string;
       readonly environmentId?: EnvironmentId;
       readonly title?: string;
+      readonly projectTitle?: string;
     }) => {
-      const cleanedText = item.clipUri ? item.text : cleanTextForSpeech(item.text);
-      if (!item.clipUri && cleanedText.length === 0) return;
-      enqueueCounter += 1;
-      const dedupeKey = `${item.key}#${enqueueCounter}`;
       const resolvedEnvId = item.environmentId ?? environmentId ?? null;
       if (resolvedEnvId) activeSpeechEnvironmentId = resolvedEnvId;
+      const projectTitle = resolveProjectTitle({
+        environmentId: resolvedEnvId,
+        threadId: item.threadId,
+        projectTitle: item.projectTitle,
+      });
+      const cleanedText = item.clipUri ? item.text : cleanTextForSpeech(item.text);
+      if (!item.clipUri && cleanedText.length === 0) return;
+      const textToQueue = item.clipUri
+        ? cleanedText
+        : prefixTextWithProject(cleanedText, {
+            environmentId: resolvedEnvId,
+            threadId: item.threadId,
+            projectTitle,
+          });
+      enqueueCounter += 1;
+      const dedupeKey = `${item.key}#${enqueueCounter}`;
       readQueue.push({
         key: item.key,
         dedupeKey,
-        text: cleanedText,
+        text: textToQueue,
         source: "auto",
         clipUri: item.clipUri,
         threadId: item.threadId,
         environmentId: resolvedEnvId ?? undefined,
         title: item.title,
+        projectTitle,
       });
       if (currentSpeech.phase === null) {
         playNextFromQueue();
@@ -738,6 +823,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         threadId: item.threadId ?? currentSpeech.threadId,
         environmentId: resolvedEnvId,
         title: item.title ?? currentSpeech.title,
+        projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
         queued: readQueue.length,
       });
 
@@ -836,6 +922,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
                 threadId: item.threadId ?? currentSpeech.threadId,
                 environmentId: item.environmentId ?? currentSpeech.environmentId,
                 title: item.title ?? currentSpeech.title,
+                projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
                 phase: "playing",
                 source: item.source,
                 queued: readQueue.length,
@@ -859,6 +946,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
             threadId: item.threadId ?? currentSpeech.threadId,
             environmentId: item.environmentId ?? currentSpeech.environmentId,
             title: item.title ?? currentSpeech.title,
+            projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
             phase: "loading",
             source: item.source,
             queued: readQueue.length,
@@ -900,10 +988,12 @@ function isMessageEntry(entry: unknown): entry is ThreadFeedMessageEntry {
 export function useReadAloudAutoAnnounce(input: {
   readonly environmentId: EnvironmentId;
   readonly threadId: string;
+  readonly threadTitle?: string;
+  readonly projectTitle?: string;
   readonly feed?: ReadonlyArray<unknown>;
   readonly turnTexts?: ReadonlyMap<string, string>;
 }) {
-  const { environmentId, threadId, feed, turnTexts } = input;
+  const { environmentId, threadId, threadTitle, projectTitle, feed, turnTexts } = input;
   const { enqueue, speak } = useReadAloud(environmentId);
   const preferencesResult = useAtomValue(mobilePreferencesAtom);
   const autoRead =
@@ -964,17 +1054,42 @@ export function useReadAloudAutoAnnounce(input: {
 
     if (newlyFinished.length > 0) {
       if (isReadAloudArmedOnNextReply(threadId)) {
+        const armed = armedTargets.get(threadId);
         disarmReadAloudOnNextReply(threadId);
         const lastItem = newlyFinished[newlyFinished.length - 1];
         if (lastItem) {
           const textToSpeak = turnTexts?.get(lastItem.key) ?? lastItem.text;
-          speak({ key: lastItem.key, text: textToSpeak, threadId, environmentId });
+          const resolvedProject = armed?.projectTitle ?? projectTitle;
+          speak({
+            key: lastItem.key,
+            text: textToSpeak,
+            threadId,
+            environmentId,
+            title: armed?.threadTitle ?? threadTitle,
+            projectTitle: resolvedProject,
+          });
         }
       } else if (autoRead) {
         for (const item of newlyFinished) {
-          enqueue({ ...item, threadId, environmentId });
+          enqueue({
+            ...item,
+            threadId,
+            environmentId,
+            title: threadTitle,
+            projectTitle,
+          });
         }
       }
     }
-  }, [autoRead, environmentId, feed, speak, enqueue, threadId, turnTexts]);
+  }, [
+    autoRead,
+    environmentId,
+    feed,
+    speak,
+    enqueue,
+    threadId,
+    threadTitle,
+    projectTitle,
+    turnTexts,
+  ]);
 }

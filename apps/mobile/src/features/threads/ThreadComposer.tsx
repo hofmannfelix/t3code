@@ -701,11 +701,14 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         threadId: String(props.selectedThread.id),
         environmentId: props.selectedThread.environmentId,
         threadTitle: props.selectedThread.title,
+        projectTitle: project?.title ?? props.environmentLabel ?? "T3 Code",
       });
       await handleSend(followUp);
     },
     [
       handleSend,
+      project?.title,
+      props.environmentLabel,
       props.selectedThread.environmentId,
       props.selectedThread.id,
       props.selectedThread.title,
@@ -722,9 +725,12 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       threadId: String(props.selectedThread.id),
       environmentId: props.selectedThread.environmentId,
       threadTitle: props.selectedThread.title,
+      projectTitle: project?.title ?? props.environmentLabel ?? "T3 Code",
     });
     stopDictationAndSend();
   }, [
+    project?.title,
+    props.environmentLabel,
     props.selectedThread.environmentId,
     props.selectedThread.id,
     props.selectedThread.title,

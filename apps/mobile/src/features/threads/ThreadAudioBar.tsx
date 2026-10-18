@@ -88,6 +88,7 @@ export function ThreadAudioBar(props?: {
           </View>
           <Text className="text-xs font-t3-bold text-foreground" numberOfLines={1}>
             {statusLabel}
+            {speech.projectTitle ? ` • ${speech.projectTitle}` : ""}
             {speech.title ? ` • ${speech.title}` : ""}
           </Text>
         </Pressable>
