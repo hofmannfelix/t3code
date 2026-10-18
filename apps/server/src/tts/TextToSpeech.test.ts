@@ -1,5 +1,7 @@
 import type { TtsSettings } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
+import * as NodePath from "@effect/platform-node/NodePath";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as HttpClient from "effect/http/HttpClient";
@@ -7,6 +9,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
+import * as ServerConfig from "../config.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextToSpeech from "./TextToSpeech.ts";
@@ -35,8 +38,14 @@ const makeTestLayer = (input: {
   readonly status?: number;
   readonly recorded?: Array<RecordedRequest>;
   readonly responseBody?: string;
-}) =>
-  TextToSpeech.layer.pipe(
+}) => {
+  // Disk-backed clips read and write through the real node file system; the
+  // config layer derives its paths inside a throwaway temp base directory.
+  const layerClipsFs = NodeFileSystem.layer.pipe(Layer.provideMerge(NodePath.layer));
+  const layerTestConfig = ServerConfig.layerTest(process.cwd(), { prefix: "t3-tts-test" }).pipe(
+    Layer.provide(layerClipsFs),
+  );
+  return TextToSpeech.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         NodeCrypto.layer,
@@ -79,7 +88,10 @@ const makeTestLayer = (input: {
         ),
       ),
     ),
+    Layer.provide(layerTestConfig),
+    Layer.provide(layerClipsFs),
   );
+};
 
 describe("TextToSpeech", () => {
   it.effect("fails as not configured without a stored or inline key", () =>

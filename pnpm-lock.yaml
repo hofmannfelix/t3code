@@ -578,7 +578,7 @@ importers:
         version: 4.0.2(patch_hash=595b7d26fb635caba9c3d39fcb189bb78a000192f8d3b60ead7174b310d1ade9)(@types/node@24.12.4)(@vitest/ui@5.0.1)(bufferutil@4.1.0)(effect@4.0.2(patch_hash=ec61ee307eaec3e17f757e0e6a16296ea4b7a8c3188df0c6ec5e66301fd78688))(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.1.0(@noble/hashes@1.8.0))(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(terser@5.48.0)(typescript@7.0.2)(unrun@0.2.39)(utf-8-validate@6.0.6)(yaml@2.9.0)
       '@pierre/trees':
         specifier: 1.0.0-beta.6
-        version: 1.0.0-beta.6(@pierre/theme@1.1.0)(@shikijs/themes@4.2.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(shiki@4.2.0)
+        version: 1.0.0-beta.6(@pierre/theme@2.0.0)(@shikijs/themes@4.2.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(shiki@4.2.0)
       '@types/react':
         specifier: ~19.3.0
         version: 19.3.0
@@ -594,6 +594,37 @@ importers:
       tailwindcss:
         specifier: 4.3.3
         version: 4.3.3
+      typescript:
+        specifier: 'catalog:'
+        version: 7.0.2
+
+  apps/read-aloud-lab:
+    dependencies:
+      expo:
+        specifier: 58.0.2
+        version: 58.0.2(bd4444e61fed72e958d45f73733b7f54)
+      expo-audio:
+        specifier: 58.0.4
+        version: 58.0.4(patch_hash=c20cb927d6848c53e7bf6ec14fe12f19daae9210165d2dbaf4e0f97ce31e8742)(expo-asset@58.0.10(expo@58.0.2)(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)(typescript@7.0.2))(expo@58.0.2)(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))(react@19.3.0)
+      expo-file-system:
+        specifier: ~58.0.5
+        version: 58.0.5(expo@58.0.2)(react-native@0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6))
+      expo-secure-store:
+        specifier: ~58.0.2
+        version: 58.0.2(expo@58.0.2)
+      expo-splash-screen:
+        specifier: ~58.0.4
+        version: 58.0.4(expo@58.0.2)(typescript@7.0.2)
+      react:
+        specifier: 19.3.0
+        version: 19.3.0
+      react-native:
+        specifier: 0.88.0-rc.3
+        version: 0.88.0-rc.3(@babel/core@7.29.7)(@react-native/metro-config@0.88.0-rc.3(@babel/core@7.29.7)(bufferutil@4.1.0)(utf-8-validate@6.0.6))(@types/react@19.3.0)(bufferutil@4.1.0)(react@19.3.0)(utf-8-validate@6.0.6)
+    devDependencies:
+      '@types/react':
+        specifier: ~19.3.0
+        version: 19.3.0
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
@@ -786,7 +817,7 @@ importers:
         version: 1.5.2(patch_hash=b33a575eb1382270ed0df956307e4b6ffe4b8e4349cefeb43e14f648c0fdc3b0)(@shikijs/themes@4.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       '@pierre/trees':
         specifier: 1.0.0-beta.6
-        version: 1.0.0-beta.6(@pierre/theme@2.0.0)(@shikijs/themes@4.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(shiki@4.2.0)
+        version: 1.0.0-beta.6(@pierre/theme@1.1.0)(@shikijs/themes@4.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(shiki@4.2.0)
       '@t3tools/client-runtime':
         specifier: workspace:*
         version: link:../../packages/client-runtime
@@ -15748,20 +15779,20 @@ snapshots:
 
   '@pierre/theme@2.0.0': {}
 
-  '@pierre/theming@1.0.0(@pierre/theme@1.1.0)(@shikijs/themes@4.2.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(shiki@4.2.0)':
+  '@pierre/theming@1.0.0(@pierre/theme@1.1.0)(@shikijs/themes@4.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(shiki@4.2.0)':
     optionalDependencies:
       '@pierre/theme': 1.1.0
-      '@shikijs/themes': 4.2.0
-      react: 19.3.0
-      react-dom: 19.3.0(react@19.3.0)
-      shiki: 4.2.0
-
-  '@pierre/theming@1.0.0(@pierre/theme@2.0.0)(@shikijs/themes@4.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(shiki@4.2.0)':
-    optionalDependencies:
-      '@pierre/theme': 2.0.0
       '@shikijs/themes': 4.3.0
       react: 19.2.6
       react-dom: 19.2.6(react@19.2.6)
+      shiki: 4.2.0
+
+  '@pierre/theming@1.0.0(@pierre/theme@2.0.0)(@shikijs/themes@4.2.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(shiki@4.2.0)':
+    optionalDependencies:
+      '@pierre/theme': 2.0.0
+      '@shikijs/themes': 4.2.0
+      react: 19.3.0
+      react-dom: 19.3.0(react@19.3.0)
       shiki: 4.2.0
 
   '@pierre/theming@1.0.1(@pierre/theme@2.0.0)(@shikijs/themes@4.2.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(shiki@4.2.0)':
@@ -15780,25 +15811,25 @@ snapshots:
       react-dom: 19.2.6(react@19.2.6)
       shiki: 4.2.0
 
-  '@pierre/trees@1.0.0-beta.6(@pierre/theme@1.1.0)(@shikijs/themes@4.2.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(shiki@4.2.0)':
+  '@pierre/trees@1.0.0-beta.6(@pierre/theme@1.1.0)(@shikijs/themes@4.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(shiki@4.2.0)':
     dependencies:
-      '@pierre/theming': 1.0.0(@pierre/theme@1.1.0)(@shikijs/themes@4.2.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(shiki@4.2.0)
+      '@pierre/theming': 1.0.0(@pierre/theme@1.1.0)(@shikijs/themes@4.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(shiki@4.2.0)
       preact: 11.0.0-beta.0
       preact-render-to-string: 6.6.5(preact@11.0.0-beta.0)
-      react: 19.3.0
-      react-dom: 19.3.0(react@19.3.0)
+      react: 19.2.6
+      react-dom: 19.2.6(react@19.2.6)
     transitivePeerDependencies:
       - '@pierre/theme'
       - '@shikijs/themes'
       - shiki
 
-  '@pierre/trees@1.0.0-beta.6(@pierre/theme@2.0.0)(@shikijs/themes@4.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(shiki@4.2.0)':
+  '@pierre/trees@1.0.0-beta.6(@pierre/theme@2.0.0)(@shikijs/themes@4.2.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(shiki@4.2.0)':
     dependencies:
-      '@pierre/theming': 1.0.0(@pierre/theme@2.0.0)(@shikijs/themes@4.3.0)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(shiki@4.2.0)
+      '@pierre/theming': 1.0.0(@pierre/theme@2.0.0)(@shikijs/themes@4.2.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(shiki@4.2.0)
       preact: 11.0.0-beta.0
       preact-render-to-string: 6.6.5(preact@11.0.0-beta.0)
-      react: 19.2.6
-      react-dom: 19.2.6(react@19.2.6)
+      react: 19.3.0
+      react-dom: 19.3.0(react@19.3.0)
     transitivePeerDependencies:
       - '@pierre/theme'
       - '@shikijs/themes'

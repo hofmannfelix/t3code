@@ -262,65 +262,26 @@ function AutoSettleSettingsRows() {
 }
 
 /**
- * Device-local beta toggles, the counterpart of web's Working section (beta)
- * in Settings → General.
- */
-/**
  * Read-aloud automation per environment: provider and key live on the server
  * (configured from the desktop), the phone only flips the auto-read switch
  * that feeds finished replies into the speaking queue.
  */
 function ReadAloudSettingsRows() {
-  const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
-  const projectSelected = selectedProjectKey !== null;
-  const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
-  const syncEnvironments = selectedTargets.filter(supportsSharedSettingsSync);
-  const syncTargets = resolveMobileSettingsTargets(
-    syncEnvironments,
-    projectSelected ? (selectedProject?.members.map((member) => member.project) ?? []) : null,
-  );
-  const reference = syncTargets[0] ?? null;
-  const referenceSettings = reference?.settings ?? null;
-  const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
-    label: "read-aloud settings update",
-    reportFailure: true,
-  });
-
-  if (reference === null || referenceSettings === null) return null;
-
-  const checked = referenceSettings.tts?.autoReadAloud ?? false;
-
-  const writeChunkedPlayback = (value: boolean) => {
-    for (const target of syncTargets) {
-      updateSettings({
-        environmentId: target.environment.environmentId,
-        input: { patch: { tts: { chunkedPlayback: value } } },
-      });
-    }
-  };
+  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
+  const preferences = useAtomValue(mobilePreferencesAtom);
+  const checked =
+    AsyncResult.isSuccess(preferences) && preferences.value.readAloudAutoSpeak === true;
 
   return (
     <SettingsSection title="Read aloud">
       <SettingsSwitchRow
         icon="speaker.wave.2"
         label="Read new replies aloud"
-        subtitle="Speaks every finished reply with the server's voice."
+        subtitle="Speaks newly completed assistant replies on this device."
         value={checked}
         onValueChange={(value) => {
-          for (const target of syncTargets) {
-            updateSettings({
-              environmentId: target.environment.environmentId,
-              input: { patch: { tts: { autoReadAloud: value } } },
-            });
-          }
+          savePreferences({ readAloudAutoSpeak: value });
         }}
-      />
-      <SettingsSwitchRow
-        icon="speaker.wave.2"
-        label="Load replies in sentence chunks"
-        subtitle="Starts playback in seconds by speaking sentence groups (1, 2, 4, 8) while the rest synthesizes."
-        value={referenceSettings.tts?.chunkedPlayback ?? true}
-        onValueChange={writeChunkedPlayback}
       />
     </SettingsSection>
   );
@@ -338,44 +299,15 @@ function BetaSettingsSection() {
         <SettingsSwitchRow
           icon="bolt.circle"
           label="Working section"
+          subtitle="Keep active work in a shelf above the thread list"
           value={workingShelfEnabled}
           onValueChange={(value) => savePreferences({ workingShelfEnabled: value })}
         />
       </SettingsSection>
-      <Text className="px-2 text-sm text-foreground-muted">
-        Fold working and monitoring threads into a Working section. They return to the top of the
-        list when they need you. While this is on, active threads are ordered by time and cannot be
-        moved.
-      </Text>
     </View>
   );
 }
 
-/**
- * Device-local legacy toggles. Mobile has no client-settings sync, so this is
- * the counterpart of web's Settings → General → Legacy features backed by
- * mobile preferences.
- */
 function LegacySettingsSection() {
-  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
-  const preferences = useAtomValue(mobilePreferencesAtom);
-  const planModeEnabled =
-    AsyncResult.isSuccess(preferences) && preferences.value.planModeEnabled === true;
-
-  return (
-    <View className="gap-3">
-      <SettingsSection title="Legacy">
-        <SettingsSwitchRow
-          icon="hammer"
-          label="Plan Mode"
-          value={planModeEnabled}
-          onValueChange={(value) => savePreferences({ planModeEnabled: value })}
-        />
-      </SettingsSection>
-      <Text className="px-2 text-sm text-foreground-muted">
-        Opt into retired interfaces kept for compatibility. Plan Mode restores the Build/Plan
-        control; otherwise every task runs in Build mode.
-      </Text>
-    </View>
-  );
+  return null;
 }

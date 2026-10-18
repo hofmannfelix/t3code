@@ -1,21 +1,30 @@
 import { DEFAULT_SERVER_SETTINGS, type EnvironmentId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import {
-  createAudioPlayer,
+  createAudioPlaylist,
   setAudioModeAsync,
   setIsAudioActiveAsync,
-  type AudioPlayer,
+  type AudioPlaylist,
 } from "expo-audio";
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { Alert } from "react-native";
 
 import { usePreparedConnection } from "../../state/session";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { mobilePreferencesAtom } from "../../state/preferences";
+import { AsyncResult, Atom } from "effect/reactivity";
+import { Directory, File, Paths } from "expo-file-system";
+import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+import { getDeviceTtsConfig, streamWavSegments } from "./deviceTts";
+import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
 
 export interface ReadAloudSpeech {
   readonly key: string | null;
-  readonly phase: "loading" | "playing" | null;
+  readonly threadId: string | null;
+  readonly environmentId: EnvironmentId | null;
+  readonly title: string | null;
+  readonly phase: "loading" | "playing" | "paused" | null;
   readonly source: "manual" | "auto" | null;
   readonly queued: number;
 }
@@ -24,6 +33,11 @@ interface ReadItem {
   readonly key: string;
   readonly text: string;
   readonly source: "manual" | "auto";
+  readonly threadId?: string;
+  readonly environmentId?: EnvironmentId;
+  readonly title?: string;
+  /** Pre-rendered device clip; present skips synthesis and plays the file. */
+  readonly clipUri?: string;
 }
 
 interface QueueEntry extends ReadItem {
@@ -32,78 +46,173 @@ interface QueueEntry extends ReadItem {
 
 interface ThreadFeedMessageEntry {
   readonly type: "message";
+  readonly createdAt?: string;
   readonly message: {
     readonly id: string;
     readonly role: string;
     readonly streaming: boolean;
     readonly text: string;
+    readonly createdAt?: string;
+    readonly updatedAt?: string;
   };
 }
 
-const IDLE: ReadAloudSpeech = { key: null, phase: null, source: null, queued: 0 };
+const IDLE: ReadAloudSpeech = {
+  key: null,
+  threadId: null,
+  environmentId: null,
+  title: null,
+  phase: null,
+  source: null,
+  queued: 0,
+};
+
+const EMPTY_SETTINGS_ATOM = Atom.make<any>(null);
 
 const START_WATCHDOG_MS = 5_000;
-/** A request that takes this long means the connection is down; fail visibly. */
-const SYNTHESIZE_TIMEOUT_MS = 20_000;
+/**
+ * Read-aloud contract: audio starts within 20s or fails visibly. Applies to
+ * the device stream's first segment; playback itself is never cut off.
+ */
+export const STREAM_START_TIMEOUT_MS = 20_000;
+/**
+ * Server path: the provider may take 30s per attempt plus 429 retries, so
+ * this side waits longer before surfacing "the server did not answer".
+ */
+export const SYNTHESIZE_TIMEOUT_MS = 60_000;
 
 type Listener = () => void;
 
 const listeners = new Set<Listener>();
 
 let currentSpeech: ReadAloudSpeech = IDLE;
+let activeSpeechEnvironmentId: EnvironmentId | null = null;
 let readQueue: Array<QueueEntry> = [];
-let player: AudioPlayer | null = null;
-let playerSubscription: { remove: () => void } | null = null;
+let playlist: AudioPlaylist | null = null;
+let playlistSubscription: { remove: () => void } | null = null;
 let runCounter = 0;
 /** Off = the whole reply in one request; on = exponential sentence chunks. */
 let chunkedPlayback = true;
 let lastFailureAt = 0;
 let enqueueCounter = 0;
 let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
+/** Live device-stream session; stop() aborts it, consumers compare identity. */
+let activeStreamAbort: AbortController | null = null;
+/** Cached segment files created during device streaming. */
+const activeSegmentUris = new Set<string>();
+
+/** Tracks thread IDs that have an armed "Send and read aloud" request for the next reply. */
+const pendingReadAloudThreads = new Set<string>();
+
+export const armReadAloudOnNextReply = (threadId: string) => {
+  pendingReadAloudThreads.add(threadId);
+};
+
+export const disarmReadAloudOnNextReply = (threadId: string) => {
+  pendingReadAloudThreads.delete(threadId);
+};
+
+export const isReadAloudArmedOnNextReply = (threadId: string) => {
+  return pendingReadAloudThreads.has(threadId);
+};
+
+/** Stage logging for the device pipeline; visible in Metro during development. */
+const log = (...args: unknown[]) => {
+  if (typeof __DEV__ !== "undefined" && __DEV__) console.log("[read-aloud]", ...args);
+};
 
 const setSpeech = (next: ReadAloudSpeech) => {
   currentSpeech = next;
   for (const listener of listeners) listener();
 };
 
-const releasePlayer = () => {
-  playerSubscription?.remove();
-  playerSubscription = null;
-  player?.release();
-  player = null;
+/** Set when a reply starts being spoken; used for stage timing in the logs. */
+let speakStartedAt: number | null = null;
+
+const releasePlaylist = () => {
+  playlistSubscription?.remove();
+  playlistSubscription = null;
+  if (playlist) {
+    try {
+      playlist.pause();
+      playlist.clear();
+      playlist.release();
+    } catch {}
+    playlist = null;
+  }
+};
+
+const cleanupActiveSegments = () => {
+  for (const uri of activeSegmentUris) {
+    try {
+      new File(uri).delete();
+    } catch {}
+  }
+  activeSegmentUris.clear();
 };
 
 /** Stopping is a take-over: a pending auto-read queue dies with it. */
 const stopCurrent = () => {
   runCounter += 1;
+  activeStreamAbort?.abort();
+  activeStreamAbort = null;
   readQueue = [];
-  releasePlayer();
+  releasePlaylist();
+  cleanupActiveSegments();
   setSpeech(IDLE);
 };
 
 const playNextFromQueue = () => {
   if (playThroughCurrentDeps === null) return;
   const next = readQueue.shift();
-  setSpeech({ ...IDLE, queued: readQueue.length, phase: "loading", key: next?.key ?? null });
-  if (next) playThroughCurrentDeps({ key: next.key, text: next.text, source: next.source });
+  if (!next) {
+    setSpeech(IDLE);
+    return;
+  }
+  setSpeech({
+    ...IDLE,
+    queued: readQueue.length,
+    phase: "loading",
+    key: next.key,
+    threadId: next.threadId ?? currentSpeech.threadId,
+    environmentId: next.environmentId ?? currentSpeech.environmentId,
+    title: next.title ?? currentSpeech.title,
+  });
+  playThroughCurrentDeps(next);
 };
 
-const announceExhausted = (item: ReadItem, message: string) => {
+const announceExhausted = (message: string) => {
   const now = Date.now();
-  // A dropped queue already announced itself; a cascade would stack alerts.
+  // A cascade would stack alerts; the first one stands in for the rest.
   if (now - lastFailureAt >= 15_000) {
     lastFailureAt = now;
     Alert.alert("Read aloud unavailable", message);
   }
-  if (item.source === "auto") readQueue = [];
-  setSpeech({ ...IDLE, queued: 0 });
+  readQueue = [];
+  cleanupActiveSegments();
+  setSpeech(IDLE);
+};
+
+/**
+ * Ensures iOS audio session is active and configured for playback.
+ */
+const ensureAudioSession = async () => {
+  try {
+    await setAudioModeAsync({
+      allowsRecording: false,
+      interruptionMode: "duckOthers",
+      playsInSilentMode: true,
+      shouldPlayInBackground: false,
+    });
+    await setIsAudioActiveAsync(true);
+  } catch {
+    // Continue anyway; expo-audio often works regardless.
+  }
 };
 
 /**
  * Exponential lead: the first sentence plays in ~1-2s, then chunks of 2, 4
- * and 8 sentences, then the rest in one request. Every chunk covers more
- * playback time than its synthesis takes, so playback never waits, and a
- * long reply costs at most five provider calls.
+ * and 8 sentences, then the rest in one request.
  */
 const chunkReply = (text: string): string[] => {
   const sentences = text.match(/[^.!?…]+[.!?…]+["'»)]*\s*|[^.!?…]+$/g) ?? [text];
@@ -119,19 +228,42 @@ const chunkReply = (text: string): string[] => {
 };
 
 /**
- * Read-aloud for the phone: the paired server synthesizes the reply with its
- * configured provider, the clip is fetched over the connection, and
- * expo-audio plays it. One voice at a time; auto-read replies queue up, a
- * manual read takes over and clears the queue, and failures surface through
- * an alert instead of failing silently.
+ * Read-aloud for the phone:
+ * When device Gemini is configured:
+ * Uses a single SSE stream from Gemini and queues ready segment WAV files
+ * into the native AVQueuePlayer (via AudioPlaylist) for hardware gapless playback.
+ * When server provider is configured:
+ * The paired server synthesizes clips, downloaded to cache, and played.
  */
-export function useReadAloud(environmentId: EnvironmentId) {
-  const preparedConnection = usePreparedConnection(environmentId);
+export function useReadAloud(environmentId?: EnvironmentId | null) {
+  const targetEnvId = environmentId ?? activeSpeechEnvironmentId ?? null;
+  const preparedConnection = usePreparedConnection(targetEnvId);
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const readAloudPreferences = AsyncResult.isSuccess(preferencesResult)
+    ? preferencesResult.value
+    : undefined;
+  const readAloudProvider = readAloudPreferences?.readAloudProvider;
+  const readAloudGeminiApiKey = readAloudPreferences?.readAloudGeminiApiKey;
+  const readAloudGeminiModel = readAloudPreferences?.readAloudGeminiModel;
+  const readAloudGeminiVoice = readAloudPreferences?.readAloudGeminiVoice;
+
+  const deviceTtsConfig = useMemo(
+    () =>
+      getDeviceTtsConfig({
+        readAloudProvider,
+        readAloudGeminiApiKey,
+        readAloudGeminiModel,
+        readAloudGeminiVoice,
+      }),
+    [readAloudProvider, readAloudGeminiApiKey, readAloudGeminiModel, readAloudGeminiVoice],
+  );
   const ttsSynthesize = useAtomCommand(serverEnvironment.ttsSynthesize, {
     label: "speak message",
     reportFailure: false,
   });
-  const ttsSettings = useAtomValue(serverEnvironment.settingsValueAtom(environmentId));
+  const ttsSettings = useAtomValue(
+    targetEnvId ? serverEnvironment.settingsValueAtom(targetEnvId) : EMPTY_SETTINGS_ATOM,
+  );
   useEffect(() => {
     chunkedPlayback =
       ttsSettings?.tts?.chunkedPlayback ?? DEFAULT_SERVER_SETTINGS.tts.chunkedPlayback ?? true;
@@ -150,108 +282,426 @@ export function useReadAloud(environmentId: EnvironmentId) {
   const httpBaseUrl =
     preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : null;
 
-  const speak = useCallback((item: { readonly key: string; readonly text: string }) => {
-    stopCurrent();
-    const chunks = chunkedPlayback ? chunkReply(item.text) : [item.text];
-    const lead = chunks[0];
-    if (lead === undefined) return;
-    setSpeech({
-      key: item.key,
-      phase: "loading",
-      source: "manual",
-      queued: readQueue.length,
-    });
-    for (let index = 1; index < chunks.length; index++) {
-      const text = chunks[index];
-      if (text === undefined) continue;
-      readQueue.push({
+  /**
+   * Streams the reply from Gemini in ONE SSE connection and feeds segment
+   * files directly into the native AVQueuePlayer playlist for seamless 0ms playback.
+   */
+  const consumeDeviceStream = useCallback(
+    (item: ReadItem) => {
+      if (!deviceTtsConfig) return;
+      const abort = new AbortController();
+      activeStreamAbort = abort;
+      log(
+        "stream consumer: start",
+        `${item.text.length} chars`,
+        "model:",
+        deviceTtsConfig.model,
+        "voice:",
+        deviceTtsConfig.voice,
+      );
+
+      void (async () => {
+        let segmentIndex = 0;
+        let firstSegmentSeen = false;
+        let streamDone = false;
+        let started = false;
+
+        const startWatchdog = setTimeout(() => {
+          if (!firstSegmentSeen && activeStreamAbort === abort) {
+            abort.abort();
+            announceExhausted("Gemini's audio stream did not start within 20 seconds. Try again.");
+          }
+        }, STREAM_START_TIMEOUT_MS);
+
+        try {
+          await ensureAudioSession();
+          if (activeStreamAbort !== abort) return;
+
+          for await (const segmentUri of streamWavSegments(
+            deviceTtsConfig,
+            item.text,
+            abort.signal,
+          )) {
+            firstSegmentSeen = true;
+            if (activeStreamAbort !== abort) return;
+            segmentIndex += 1;
+            activeSegmentUris.add(segmentUri);
+
+            log("stream consumer: segment", segmentIndex, segmentUri);
+
+            if (!playlist) {
+              const pl = createAudioPlaylist({
+                sources: [{ uri: segmentUri }],
+              });
+              playlist = pl;
+
+              pl.addListener("trackChanged", ({ previousIndex, currentIndex }) => {
+                log("playlist trackChanged:", previousIndex, "->", currentIndex);
+              });
+
+              playlistSubscription = pl.addListener("playlistStatusUpdate", (status) => {
+                if (activeStreamAbort !== abort) return;
+                if (!started && status.isLoaded) {
+                  pl.play();
+                }
+                if (status.playing && !started) {
+                  started = true;
+                  clearTimeout(startWatchdog);
+                  log(
+                    "playlist: PLAYING",
+                    `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
+                    "queued:",
+                    readQueue.length,
+                  );
+                  setSpeech({
+                    key: item.key,
+                    threadId: item.threadId ?? currentSpeech.threadId,
+                    environmentId: item.environmentId ?? currentSpeech.environmentId,
+                    title: item.title ?? currentSpeech.title,
+                    phase: "playing",
+                    source: item.source,
+                    queued: readQueue.length,
+                  });
+                }
+                if (status.didJustFinish && streamDone) {
+                  clearTimeout(startWatchdog);
+                  releasePlaylist();
+                  cleanupActiveSegments();
+                  log("stream consumer: finished all segments, queue:", readQueue.length);
+                  if (item.source === "auto" || readQueue.length > 0) {
+                    playNextFromQueue();
+                  } else {
+                    setSpeech(IDLE);
+                  }
+                }
+              });
+
+              setSpeech({
+                key: item.key,
+                threadId: item.threadId ?? currentSpeech.threadId,
+                environmentId: item.environmentId ?? currentSpeech.environmentId,
+                title: item.title ?? currentSpeech.title,
+                phase: "loading",
+                source: item.source,
+                queued: readQueue.length,
+              });
+
+              pl.play();
+            } else {
+              playlist.add({ uri: segmentUri });
+              if (!playlist.playing) {
+                playlist.play();
+              }
+            }
+          }
+
+          clearTimeout(startWatchdog);
+          streamDone = true;
+          log("stream consumer: complete stream", `${segmentIndex} segments`);
+
+          // If the last track finished before the stream completion was marked
+          if (playlist?.currentStatus?.didJustFinish) {
+            releasePlaylist();
+            cleanupActiveSegments();
+            if (item.source === "auto" || readQueue.length > 0) {
+              playNextFromQueue();
+            } else {
+              setSpeech(IDLE);
+            }
+          }
+        } catch (error) {
+          clearTimeout(startWatchdog);
+          log("stream consumer: failed", error);
+          if (activeStreamAbort !== abort) return;
+          announceExhausted(
+            error instanceof Error && error.message.length > 0
+              ? error.message
+              : "Gemini's audio stream failed.",
+          );
+        }
+      })();
+    },
+    [deviceTtsConfig],
+  );
+
+  const speak = useCallback(
+    (item: {
+      readonly key: string;
+      readonly text: string;
+      readonly threadId?: string;
+      readonly environmentId?: EnvironmentId;
+      readonly title?: string;
+    }) => {
+      if (deviceTtsConfig && activeStreamAbort !== null && currentSpeech.key === item.key) {
+        log("speak: ignored, this reply is already streaming");
+        return;
+      }
+      stopCurrent();
+      const cleanedText = cleanTextForSpeech(item.text);
+      if (cleanedText.length === 0) {
+        log("speak: ignored, text is empty after sanitization");
+        return;
+      }
+      speakStartedAt = Date.now();
+      const resolvedEnvId =
+        item.environmentId ?? environmentId ?? currentSpeech.environmentId ?? null;
+      if (resolvedEnvId) {
+        activeSpeechEnvironmentId = resolvedEnvId;
+      }
+      if (deviceTtsConfig) {
+        log("speak: device Gemini stream", `${item.text.length} chars`);
+        setSpeech({
+          key: item.key,
+          threadId: item.threadId ?? null,
+          environmentId: resolvedEnvId,
+          title: item.title ?? null,
+          phase: "loading",
+          source: "manual",
+          queued: readQueue.length,
+        });
+        consumeDeviceStream({
+          key: item.key,
+          text: cleanedText,
+          source: "manual",
+          threadId: item.threadId,
+          environmentId: resolvedEnvId ?? undefined,
+          title: item.title,
+        });
+        return;
+      }
+      log("speak: server path", `${item.text.length} chars`, "chunked:", chunkedPlayback);
+      const chunks = chunkedPlayback ? chunkReply(cleanedText) : [cleanedText];
+      const lead = chunks[0];
+      if (lead === undefined) return;
+      setSpeech({
         key: item.key,
-        dedupeKey: `${item.key}#${index}`,
-        text,
-        source: "auto",
+        threadId: item.threadId ?? null,
+        environmentId: resolvedEnvId,
+        title: item.title ?? null,
+        phase: "loading",
+        source: "manual",
+        queued: readQueue.length,
+      });
+      playThroughCurrentDeps?.({
+        key: item.key,
+        text: lead,
+        source: "manual",
+        threadId: item.threadId,
+        environmentId: resolvedEnvId ?? undefined,
+        title: item.title,
+      });
+      for (let index = 1; index < chunks.length; index++) {
+        const text = chunks[index];
+        if (text === undefined) continue;
+        readQueue.push({
+          key: item.key,
+          dedupeKey: `${item.key}#${index}`,
+          text,
+          source: "auto",
+          threadId: item.threadId,
+          environmentId: resolvedEnvId ?? undefined,
+          title: item.title,
+        });
+      }
+    },
+    [consumeDeviceStream, deviceTtsConfig, environmentId],
+  );
+
+  const pause = useCallback(() => {
+    if (playlist && (currentSpeech.phase === "playing" || currentSpeech.phase === "loading")) {
+      try {
+        playlist.pause();
+      } catch (e) {
+        log("pause: failed", e);
+      }
+      setSpeech({
+        ...currentSpeech,
+        phase: "paused",
       });
     }
-    if (currentSpeech.key === null) playNextFromQueue();
+  }, []);
+
+  const resume = useCallback(() => {
+    if (playlist && currentSpeech.phase === "paused") {
+      try {
+        playlist.play();
+      } catch (e) {
+        log("resume: failed", e);
+      }
+      setSpeech({
+        ...currentSpeech,
+        phase: "playing",
+      });
+    }
+  }, []);
+
+  const seekBy = useCallback((deltaSeconds: number) => {
+    if (playlist) {
+      try {
+        const pl = playlist as unknown as {
+          currentTime?: number;
+          currentStatus?: { currentTime?: number };
+          seekTo?: (seconds: number) => Promise<void>;
+        };
+        const current = pl.currentTime ?? pl.currentStatus?.currentTime ?? 0;
+        const target = Math.max(0, current + deltaSeconds);
+        void pl.seekTo?.(target);
+      } catch (e) {
+        log("seekBy: failed", e);
+      }
+    }
   }, []);
 
   const stop = useCallback(() => {
     stopCurrent();
   }, []);
 
-  const enqueue = useCallback((item: { readonly key: string; readonly text: string }) => {
-    enqueueCounter += 1;
-    readQueue.push({
-      key: item.key,
-      dedupeKey: `${item.key}#${enqueueCounter}`,
-      text: item.text,
-      source: "auto",
-    });
-    if (currentSpeech.key === null) playNextFromQueue();
-  }, []);
+  const enqueue = useCallback(
+    (item: {
+      readonly key: string;
+      readonly text: string;
+      readonly clipUri?: string;
+      readonly threadId?: string;
+      readonly environmentId?: EnvironmentId;
+      readonly title?: string;
+    }) => {
+      const cleanedText = item.clipUri ? item.text : cleanTextForSpeech(item.text);
+      if (!item.clipUri && cleanedText.length === 0) return;
+      enqueueCounter += 1;
+      const dedupeKey = `${item.key}#${enqueueCounter}`;
+      const resolvedEnvId = item.environmentId ?? environmentId ?? null;
+      if (resolvedEnvId) activeSpeechEnvironmentId = resolvedEnvId;
+      readQueue.push({
+        key: item.key,
+        dedupeKey,
+        text: cleanedText,
+        source: "auto",
+        clipUri: item.clipUri,
+        threadId: item.threadId,
+        environmentId: resolvedEnvId ?? undefined,
+        title: item.title,
+      });
+      if (currentSpeech.phase === null) {
+        playNextFromQueue();
+      } else {
+        setSpeech({ ...currentSpeech, queued: readQueue.length });
+      }
+    },
+    [environmentId],
+  );
 
-  // Fresh closure after every commit; the queue plays through it.
   useEffect(() => {
     playThroughCurrentDeps = (item: ReadItem) => {
       const run = ++runCounter;
       const isCurrent = () => run === runCounter;
-      if (httpBaseUrl === null) {
-        announceExhausted(item, "This environment is not connected right now.");
+      const resolvedEnvId =
+        item.environmentId ?? environmentId ?? activeSpeechEnvironmentId ?? null;
+      if (resolvedEnvId) activeSpeechEnvironmentId = resolvedEnvId;
+      setSpeech({
+        ...IDLE,
+        phase: "loading",
+        key: item.key,
+        threadId: item.threadId ?? currentSpeech.threadId,
+        environmentId: resolvedEnvId,
+        title: item.title ?? currentSpeech.title,
+        queued: readQueue.length,
+      });
+
+      if (httpBaseUrl === null && !deviceTtsConfig) {
+        announceExhausted("This environment is not connected right now.");
         return;
       }
+
+      if (!item.clipUri && deviceTtsConfig) {
+        consumeDeviceStream(item);
+        return;
+      }
+
       const startPlayback = async () => {
-        // Voice input deactivates the audio session after recordings, and the
-        // silent switch would mute us: read-aloud is explicitly requested, so
-        // it overrides both (like a played video would).
-        try {
-          await setAudioModeAsync({
-            allowsRecording: false,
-            interruptionMode: "duckOthers",
-            playsInSilentMode: true,
-            shouldPlayInBackground: false,
-          });
-          await setIsAudioActiveAsync(true);
-        } catch {
-          // Still attempt playback; expo-audio often works regardless.
-        }
+        await ensureAudioSession();
         if (!isCurrent()) return;
+
         try {
-          const result = await Promise.race([
-            ttsSynthesize({
-              environmentId,
-              input: { text: item.text },
-            }),
-            new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error("synthesize-timeout")), SYNTHESIZE_TIMEOUT_MS);
-            }),
-          ]);
-          if (!isCurrent()) return;
-          if (result._tag !== "Success") {
-            announceExhausted(
-              item,
-              "The server could not synthesize this reply. Check the read-aloud settings on your Mac.",
-            );
-            return;
+          let clipUri: string | null;
+          if (item.clipUri) {
+            clipUri = item.clipUri;
+          } else {
+            const result = await Promise.race([
+              ttsSynthesize({
+                environmentId: resolvedEnvId ?? (environmentId as EnvironmentId),
+                input: { text: item.text },
+              }),
+              new Promise<never>((_, reject) => {
+                setTimeout(
+                  () =>
+                    reject(
+                      new Error("The server did not answer. Check the connection and try again."),
+                    ),
+                  SYNTHESIZE_TIMEOUT_MS,
+                );
+              }),
+            ]);
+            if (!isCurrent()) return;
+            if (result._tag !== "Success") {
+              announceExhausted(
+                "The server could not synthesize this reply. Check the read-aloud settings on your Mac.",
+              );
+              return;
+            }
+            clipUri =
+              httpBaseUrl === null ? null : resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
+            if (clipUri === null) {
+              announceExhausted("The reply clip could not be loaded. Reconnect and try again.");
+              return;
+            }
+            const clipFile = await File.downloadFileAsync(clipUri, new Directory(Paths.cache), {
+              idempotent: true,
+            });
+            clipUri = clipFile.uri;
           }
-          const clipUri = `${httpBaseUrl}${result.value.relativeUrl}`;
-          const clipPlayer = createAudioPlayer({ uri: clipUri });
-          player = clipPlayer;
+          if (!isCurrent()) return;
+
+          const clipPlaylist = (() => {
+            try {
+              return createAudioPlaylist({ sources: [{ uri: clipUri }] });
+            } catch (error) {
+              log("playlist: createAudioPlaylist FAILED", error, clipUri);
+              throw error;
+            }
+          })();
+
+          log(
+            "playlist: created",
+            item.clipUri ? "device segment" : "server clip",
+            `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
+            clipUri,
+          );
+          playlist = clipPlaylist;
           let started = false;
-          // A start that never arrives is the only reliable failure signal on
-          // device; the watchdog turns it into a visible message.
+
           const startWatchdog = setTimeout(() => {
             if (started || !isCurrent()) return;
-            releasePlayer();
-            announceExhausted(item, "The reply clip did not start playing.");
+            releasePlaylist();
+            announceExhausted("The reply clip did not start playing.");
           }, START_WATCHDOG_MS);
-          playerSubscription = clipPlayer.addListener("playbackStatusUpdate", (status) => {
+
+          playlistSubscription = clipPlaylist.addListener("playlistStatusUpdate", (status) => {
             if (!isCurrent()) return;
-            // Remote clips need preparation before play() takes effect.
-            if (!started && status.isLoaded) clipPlayer.play();
+            if (!started && status.isLoaded) clipPlaylist.play();
             if (status.playing && !started) {
               started = true;
               clearTimeout(startWatchdog);
+              log(
+                "playlist: PLAYING",
+                `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
+                "queued:",
+                readQueue.length,
+              );
               setSpeech({
                 key: item.key,
+                threadId: item.threadId ?? currentSpeech.threadId,
+                environmentId: item.environmentId ?? currentSpeech.environmentId,
+                title: item.title ?? currentSpeech.title,
                 phase: "playing",
                 source: item.source,
                 queued: readQueue.length,
@@ -259,80 +709,42 @@ export function useReadAloud(environmentId: EnvironmentId) {
             }
             if (status.didJustFinish) {
               clearTimeout(startWatchdog);
-              releasePlayer();
-              if (item.source === "auto") playNextFromQueue();
-              else setSpeech(IDLE);
+              releasePlaylist();
+              log("playlist: finished segment, queue:", readQueue.length);
+              if (item.source === "auto" || readQueue.length > 0) {
+                playNextFromQueue();
+              } else {
+                cleanupActiveSegments();
+                setSpeech(IDLE);
+              }
             }
           });
+
           setSpeech({
             key: item.key,
+            threadId: item.threadId ?? currentSpeech.threadId,
+            environmentId: item.environmentId ?? currentSpeech.environmentId,
+            title: item.title ?? currentSpeech.title,
             phase: "loading",
             source: item.source,
             queued: readQueue.length,
           });
-          clipPlayer.play();
-        } catch {
+          clipPlaylist.play();
+        } catch (error) {
           if (!isCurrent()) return;
+          log("playlist: failed", error);
           announceExhausted(
-            item,
-            "flexbook did not answer. Check the connection (the thread header shows it) and try again.",
+            error instanceof Error && error.message.length > 0
+              ? error.message
+              : "The server did not answer. Check the connection and try again.",
           );
         }
       };
       void startPlayback();
     };
-  }, [environmentId, httpBaseUrl, ttsSynthesize]);
+  }, [consumeDeviceStream, deviceTtsConfig, environmentId, httpBaseUrl, ttsSynthesize]);
 
-  return { speech, speak, stop, enqueue };
-}
-
-/**
- * Announces newly finished assistant replies of one thread to the shared
- * queue while auto-read is on. History stays silent: only replies that
- * complete while this feed is mounted are spoken, and switching threads
- * silences the old conversation's backlog.
- */
-export function useReadAloudAutoAnnounce(input: {
-  readonly environmentId: EnvironmentId;
-  readonly threadId: string;
-  readonly feed?: ReadonlyArray<unknown>;
-}) {
-  const { environmentId, threadId, feed } = input;
-  const { enqueue, stop } = useReadAloud(environmentId);
-  const settings = useAtomValue(serverEnvironment.settingsValueAtom(environmentId));
-  const autoRead =
-    settings?.tts?.autoReadAloud ?? DEFAULT_SERVER_SETTINGS.tts.autoReadAloud ?? false;
-
-  const announcedIdsRef = useRef<Set<string>>(new Set());
-  const isFirstPassRef = useRef(true);
-  const lastThreadKeyRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    if (lastThreadKeyRef.current === threadId) return;
-    lastThreadKeyRef.current = threadId;
-    announcedIdsRef.current = new Set();
-    isFirstPassRef.current = true;
-    stop();
-  }, [threadId, stop]);
-
-  useEffect(() => {
-    if (!Array.isArray(feed)) return;
-    const newlyFinished: Array<{ readonly key: string; readonly text: string }> = [];
-    for (const entry of feed) {
-      if (!isMessageEntry(entry)) continue;
-      const message = entry.message;
-      // Streaming rows are left unseen: their completion is the announcement.
-      if (message.role !== "assistant" || message.streaming) continue;
-      if (message.text.trim().length === 0) continue;
-      if (announcedIdsRef.current.has(message.id)) continue;
-      announcedIdsRef.current.add(message.id);
-      if (!isFirstPassRef.current) newlyFinished.push({ key: message.id, text: message.text });
-    }
-    isFirstPassRef.current = false;
-    if (autoRead) {
-      for (const item of newlyFinished) enqueue(item);
-    }
-  }, [feed, autoRead, enqueue]);
+  return { speech, speak, pause, resume, seekBy, stop, enqueue };
 }
 
 function isMessageEntry(entry: unknown): entry is ThreadFeedMessageEntry {
@@ -342,4 +754,93 @@ function isMessageEntry(entry: unknown): entry is ThreadFeedMessageEntry {
     (entry as { type?: unknown }).type === "message" &&
     typeof (entry as { message?: unknown }).message === "object"
   );
+}
+
+/**
+ * Announces newly finished assistant replies of one thread to the shared
+ * queue while auto-read is on. History stays silent: only replies that
+ * complete while this feed is mounted are spoken.
+ * Crucially: switching threads does NOT cancel or re-initialize an actively
+ * playing speech session.
+ */
+export function useReadAloudAutoAnnounce(input: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: string;
+  readonly feed?: ReadonlyArray<unknown>;
+  readonly turnTexts?: ReadonlyMap<string, string>;
+}) {
+  const { environmentId, threadId, feed, turnTexts } = input;
+  const { enqueue, speak } = useReadAloud(environmentId);
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const autoRead =
+    AsyncResult.isSuccess(preferencesResult) && preferencesResult.value.readAloudAutoSpeak === true;
+
+  const announcedIdsRef = useRef<Set<string>>(new Set());
+  const seenStreamingIdsRef = useRef<Set<string>>(new Set());
+  const threadOpenedAtRef = useRef<number>(Date.now());
+  const initialLoadHandledRef = useRef(false);
+  const lastThreadKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (lastThreadKeyRef.current === threadId) return;
+    lastThreadKeyRef.current = threadId;
+    threadOpenedAtRef.current = Date.now();
+    initialLoadHandledRef.current = false;
+    announcedIdsRef.current = new Set();
+    seenStreamingIdsRef.current = new Set();
+    // Do NOT stop() here. Existing audio sessions continue playing globally!
+  }, [threadId]);
+
+  useEffect(() => {
+    if (!Array.isArray(feed)) return;
+    const newlyFinished: Array<{ readonly key: string; readonly text: string }> = [];
+    const threadOpenedAt = threadOpenedAtRef.current;
+    const isFirstPassWithContent = !initialLoadHandledRef.current && feed.length > 0;
+    if (isFirstPassWithContent) {
+      initialLoadHandledRef.current = true;
+    }
+
+    for (const entry of feed) {
+      if (!isMessageEntry(entry)) continue;
+      const message = entry.message;
+      if (message.role !== "assistant") continue;
+
+      // Track messages seen streaming in this session so we know their completion is new.
+      if (message.streaming) {
+        seenStreamingIdsRef.current.add(message.id);
+        continue;
+      }
+
+      if (message.text.trim().length === 0) continue;
+      if (announcedIdsRef.current.has(message.id)) continue;
+      announcedIdsRef.current.add(message.id);
+
+      // Check whether this message completed before entering the thread.
+      const timestampStr = message.updatedAt || message.createdAt || entry.createdAt;
+      const messageTime = timestampStr ? Date.parse(timestampStr) : NaN;
+      const wasCompletedBeforeOpening =
+        isFirstPassWithContent || (Number.isFinite(messageTime) && messageTime < threadOpenedAt);
+
+      if (wasCompletedBeforeOpening && !seenStreamingIdsRef.current.has(message.id)) {
+        continue;
+      }
+
+      newlyFinished.push({ key: message.id, text: message.text });
+    }
+
+    if (newlyFinished.length > 0) {
+      if (isReadAloudArmedOnNextReply(threadId)) {
+        disarmReadAloudOnNextReply(threadId);
+        const lastItem = newlyFinished[newlyFinished.length - 1];
+        if (lastItem) {
+          const textToSpeak = turnTexts?.get(lastItem.key) ?? lastItem.text;
+          speak({ key: lastItem.key, text: textToSpeak, threadId, environmentId });
+        }
+      } else if (autoRead) {
+        for (const item of newlyFinished) {
+          enqueue({ ...item, threadId, environmentId });
+        }
+      }
+    }
+  }, [autoRead, environmentId, feed, speak, enqueue, threadId, turnTexts]);
 }

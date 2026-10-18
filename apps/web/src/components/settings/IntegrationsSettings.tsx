@@ -3,7 +3,6 @@ import { DeviceToolVersions } from "../device/DeviceToolVersions";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { ScopedSwitch } from "./ScopedSwitch";
 import { DeviceHostsSettings } from "./DeviceHostsSettings";
-import { TtsSettings } from "./TtsSettings";
 /**
  * Integrations settings - preferences for surfaces T3 Code embeds rather than
  * owns. Browser is the first section: the defaults a preview tab opens at,
@@ -620,24 +619,6 @@ function BrowserLinkTargetSetting({ disabled }: { readonly disabled: boolean }) 
         </Select>
       }
     />
-  );
-}
-
-function TtsIntegrationSettings() {
-  const { environment: selected } = useSettingsScope();
-  const connected = selected?.connection.phase === "connected" && selected.serverConfig !== null;
-  const environmentId = connected ? selected.environmentId : null;
-
-  return (
-    <SettingsSection id="read-aloud" title="Read aloud">
-      {environmentId === null ? (
-        <SettingsUnavailableGroup message="Connect to a server to configure read-aloud voices.">
-          {null}
-        </SettingsUnavailableGroup>
-      ) : (
-        <TtsSettings key={environmentId} environmentId={environmentId} onSaved={() => {}} />
-      )}
-    </SettingsSection>
   );
 }
 
@@ -1565,7 +1546,6 @@ export function IntegrationsSettingsPanel() {
           previewDefaults
         )}
       </SettingsSection>
-      <TtsIntegrationSettings />
       <DeviceIntegrationSettings />
     </SettingsPageContainer>
   );

@@ -1,6 +1,10 @@
 import { replaceTextRange } from "@t3tools/shared/composerTrigger";
 
-import type { PreparedVoiceTranscription, VoiceTranscriber } from "./transcription.ts";
+import {
+  VoiceTranscriptionError,
+  type PreparedVoiceTranscription,
+  type VoiceTranscriber,
+} from "./transcription.ts";
 
 export const VOICE_RECORDING_LIMIT_SECONDS = 5 * 60;
 
@@ -164,6 +168,13 @@ function errorCode(error: unknown): string | null {
   return typeof error.code === "string" ? error.code : null;
 }
 
+/** Transcription errors carry a user-facing reason; only fall back when one is missing. */
+function voiceTranscriptionDetail(error: unknown): string | null {
+  if (!(error instanceof VoiceTranscriptionError)) return null;
+  const message = error.message.trim();
+  return message.length > 0 ? message : null;
+}
+
 function preparationErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message === "voice-operation-busy") {
     return "Voice transcription is still finishing. Try again shortly.";
@@ -171,14 +182,14 @@ function preparationErrorMessage(error: unknown): string {
   if (errorCode(error) === "unsupported-locale") {
     return "Voice transcription is not available for this language.";
   }
-  return "Could not prepare voice transcription.";
+  return voiceTranscriptionDetail(error) ?? "Could not prepare voice transcription.";
 }
 
 function transcriptionErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message === "voice-operation-busy") {
     return "Voice transcription is still finishing. Try again shortly.";
   }
-  return "Could not transcribe this recording.";
+  return voiceTranscriptionDetail(error) ?? "Could not transcribe this recording.";
 }
 
 const IDLE_STATE: VoiceInputState = { phase: "idle", error: null, errorAction: null };

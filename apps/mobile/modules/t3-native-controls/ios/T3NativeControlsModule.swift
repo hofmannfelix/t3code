@@ -1,6 +1,106 @@
+import AVFoundation
 import ExpoModulesCore
 import Security
 import UIKit
+
+@objc(T3SpeechSynthesizerDelegate)
+final class T3SpeechSynthesizerDelegate: NSObject, AVSpeechSynthesizerDelegate {
+  private let onFinish: () -> Void
+
+  init(onFinish: @escaping () -> Void) {
+    self.onFinish = onFinish
+    super.init()
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+    onFinish()
+  }
+
+  func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+    onFinish()
+  }
+}
+
+public final class T3NativeSpeechSynthesizer {
+  public static let shared = T3NativeSpeechSynthesizer()
+  private let synthesizer = AVSpeechSynthesizer()
+  private var activeDelegate: T3SpeechSynthesizerDelegate?
+
+  private init() {}
+
+  public func speak(
+    text: String,
+    language: String? = nil,
+    pitch: Float? = nil,
+    rate: Float? = nil,
+    voiceIdentifier: String? = nil,
+    completion: @escaping () -> Void
+  ) {
+    if synthesizer.isSpeaking {
+      synthesizer.stopSpeaking(at: .immediate)
+    }
+
+    let utterance = AVSpeechUtterance(string: text)
+
+    if let voiceIdentifier = voiceIdentifier,
+       let voice = AVSpeechSynthesisVoice(identifier: voiceIdentifier) {
+      utterance.voice = voice
+    } else if let language = language,
+              let voice = AVSpeechSynthesisVoice(language: language) {
+      utterance.voice = voice
+    } else {
+      utterance.voice = AVSpeechSynthesisVoice(language: AVSpeechSynthesisVoice.currentLanguageCode())
+    }
+
+    if let pitch = pitch {
+      utterance.pitchMultiplier = max(0.5, min(2.0, pitch))
+    }
+
+    if let rate = rate {
+      utterance.rate = max(AVSpeechUtteranceMinimumSpeechRate, min(AVSpeechUtteranceMaximumSpeechRate, rate * AVSpeechUtteranceDefaultSpeechRate))
+    }
+
+    let delegate = T3SpeechSynthesizerDelegate { [weak self] in
+      self?.activeDelegate = nil
+      completion()
+    }
+    self.activeDelegate = delegate
+    synthesizer.delegate = delegate
+
+    do {
+      let audioSession = AVAudioSession.sharedInstance()
+      try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+      try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+    } catch {
+      NSLog("[T3NativeSpeechSynthesizer] Audio session activation error: \(error)")
+    }
+
+    synthesizer.speak(utterance)
+  }
+
+  public func stop() {
+    if synthesizer.isSpeaking {
+      synthesizer.stopSpeaking(at: .immediate)
+    }
+    activeDelegate = nil
+  }
+
+  public func pause() {
+    if synthesizer.isSpeaking {
+      synthesizer.pauseSpeaking(at: .immediate)
+    }
+  }
+
+  public func resume() {
+    if synthesizer.isPaused {
+      synthesizer.continueSpeaking()
+    }
+  }
+
+  public func isSpeaking() -> Bool {
+    return synthesizer.isSpeaking
+  }
+}
 
 // Expo Modules 2.0: plain members marked @JS are bound by the macro, while the
 // views and main-queue presenters stay in definition(). Both are merged.
@@ -39,12 +139,49 @@ public final class T3NativeControlsModule: Module {
                            identifier: identifier, promise: promise)
     }.runOnQueue(.main)
 
+    AsyncFunction("speakText") { (text: String, options: [String: Any]?, promise: Promise) in
+      let language = options?["language"] as? String
+      let pitch = (options?["pitch"] as? NSNumber)?.floatValue
+      let rate = (options?["rate"] as? NSNumber)?.floatValue
+      let voice = options?["voice"] as? String
+
+      T3NativeSpeechSynthesizer.shared.speak(
+        text: text,
+        language: language,
+        pitch: pitch,
+        rate: rate,
+        voiceIdentifier: voice
+      ) {
+        promise.resolve(nil)
+      }
+    }.runOnQueue(.main)
+
+    AsyncFunction("stopSpeaking") { (promise: Promise) in
+      T3NativeSpeechSynthesizer.shared.stop()
+      promise.resolve(nil)
+    }.runOnQueue(.main)
+
+    AsyncFunction("pauseSpeaking") { (promise: Promise) in
+      T3NativeSpeechSynthesizer.shared.pause()
+      promise.resolve(nil)
+    }.runOnQueue(.main)
+
+    AsyncFunction("resumeSpeaking") { (promise: Promise) in
+      T3NativeSpeechSynthesizer.shared.resume()
+      promise.resolve(nil)
+    }.runOnQueue(.main)
+
+    Function("isSpeaking") { () -> Bool in
+      return T3NativeSpeechSynthesizer.shared.isSpeaking()
+    }
+
     OnDestroy {
       let presentation = self.videoPresentation
       let file = self.filePresentation
       DispatchQueue.main.async {
         presentation?.dismiss()
         file?.dismiss()
+        T3NativeSpeechSynthesizer.shared.stop()
       }
     }
 

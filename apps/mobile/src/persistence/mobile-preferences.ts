@@ -16,12 +16,7 @@ import { MobileStorageDecodeError, MobileStorageEncodeError } from "./mobile-sto
 const PREFERENCES_KEY = "t3code.preferences";
 const PREFERENCES_FALLBACK_KEY = "t3code.preferences.fallback";
 
-export const VOICE_TRANSCRIPTION_PROVIDERS = [
-  "apple",
-  "groq",
-  "openai",
-  "custom",
-] as const;
+export const VOICE_TRANSCRIPTION_PROVIDERS = ["apple", "groq", "openai", "custom"] as const;
 export type VoiceTranscriptionProvider = (typeof VOICE_TRANSCRIPTION_PROVIDERS)[number];
 
 export interface Preferences {
@@ -64,8 +59,12 @@ export interface Preferences {
   readonly voiceTranscriptionApiKey?: string;
   readonly voiceTranscriptionCustomEndpoint?: string;
   readonly voiceTranscriptionCustomModel?: string;
-  readonly voiceTranscriptionLanguage?: string;
-
+  /** Read-aloud synthesis: on the paired server (default) or directly on this device. */
+  readonly readAloudProvider?: "server" | "gemini";
+  readonly readAloudGeminiApiKey?: string;
+  readonly readAloudGeminiModel?: string;
+  readonly readAloudGeminiVoice?: string;
+  readonly readAloudAutoSpeak?: boolean;
 }
 
 export class MobilePreferencesLoadError extends Schema.TaggedError<MobilePreferencesLoadError>()(
@@ -129,6 +128,15 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     threadListSettledShelfExpanded?: boolean;
     threadListSnoozedShelfExpanded?: boolean;
     threadListWorkingShelfExpanded?: boolean;
+    voiceTranscriptionProvider?: VoiceTranscriptionProvider;
+    voiceTranscriptionApiKey?: string;
+    voiceTranscriptionCustomEndpoint?: string;
+    voiceTranscriptionCustomModel?: string;
+    readAloudProvider?: "server" | "gemini";
+    readAloudGeminiApiKey?: string;
+    readAloudGeminiModel?: string;
+    readAloudGeminiVoice?: string;
+    readAloudAutoSpeak?: boolean;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -226,7 +234,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     typeof parsed.voiceTranscriptionProvider === "string" &&
     (VOICE_TRANSCRIPTION_PROVIDERS as readonly string[]).includes(parsed.voiceTranscriptionProvider)
   ) {
-    preferences.voiceTranscriptionProvider = parsed.voiceTranscriptionProvider as VoiceTranscriptionProvider;
+    preferences.voiceTranscriptionProvider =
+      parsed.voiceTranscriptionProvider as VoiceTranscriptionProvider;
   }
   if (typeof parsed.voiceTranscriptionApiKey === "string") {
     preferences.voiceTranscriptionApiKey = parsed.voiceTranscriptionApiKey;
@@ -237,8 +246,20 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   if (typeof parsed.voiceTranscriptionCustomModel === "string") {
     preferences.voiceTranscriptionCustomModel = parsed.voiceTranscriptionCustomModel;
   }
-  if (typeof parsed.voiceTranscriptionLanguage === "string") {
-    preferences.voiceTranscriptionLanguage = parsed.voiceTranscriptionLanguage;
+  if (parsed.readAloudProvider === "server" || parsed.readAloudProvider === "gemini") {
+    preferences.readAloudProvider = parsed.readAloudProvider;
+  }
+  if (typeof parsed.readAloudGeminiApiKey === "string") {
+    preferences.readAloudGeminiApiKey = parsed.readAloudGeminiApiKey;
+  }
+  if (typeof parsed.readAloudGeminiModel === "string") {
+    preferences.readAloudGeminiModel = parsed.readAloudGeminiModel;
+  }
+  if (typeof parsed.readAloudGeminiVoice === "string") {
+    preferences.readAloudGeminiVoice = parsed.readAloudGeminiVoice;
+  }
+  if (typeof parsed.readAloudAutoSpeak === "boolean") {
+    preferences.readAloudAutoSpeak = parsed.readAloudAutoSpeak;
   }
 
   return preferences;

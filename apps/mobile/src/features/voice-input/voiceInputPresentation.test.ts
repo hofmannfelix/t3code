@@ -29,7 +29,8 @@ describe("resolveVoiceComposerPresentation", () => {
     ).toMatchObject({
       leadingAction: "cancel",
       trailingAction: "confirm",
-      showsSend: false,
+      // Gemini-style: while recording, send stops, transcribes, and sends.
+      showsSend: true,
       statusLabel: "Recording 1:04",
       confirmationEnabled: true,
     });

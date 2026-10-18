@@ -231,7 +231,7 @@ export function ComposerActionButton(props: {
   readonly disabled?: boolean;
   readonly icon: ComponentProps<typeof SymbolView>["name"];
   readonly onPress: () => void;
-  readonly variant?: "primary" | "danger";
+  readonly variant?: "primary" | "danger" | "secondary";
   // Forwarded so a ControlPillMenu can drive this button as its long-press
   // anchor: Android injects onLongPress, iOS injects onTouchStart and onPress.
   readonly onLongPress?: PressableProps["onLongPress"];
@@ -256,9 +256,13 @@ export function ComposerActionButton(props: {
           "items-center justify-center rounded-full",
           props.variant === "danger"
             ? "bg-danger"
-            : props.disabled
-              ? "bg-primary/15"
-              : "bg-primary",
+            : props.variant === "secondary"
+              ? props.disabled
+                ? "bg-foreground/5 opacity-40"
+                : "bg-foreground/10 active:bg-foreground/20"
+              : props.disabled
+                ? "bg-primary/15"
+                : "bg-primary",
         )}
       >
         <SymbolView
@@ -266,7 +270,13 @@ export function ComposerActionButton(props: {
           size={smallIconSize}
           weight="semibold"
           tintColorClassName={
-            props.variant === "danger" ? "accent-danger-foreground" : "accent-primary-foreground"
+            props.variant === "danger"
+              ? "accent-danger-foreground"
+              : props.variant === "secondary"
+                ? props.disabled
+                  ? "accent-foreground-muted"
+                  : "accent-foreground"
+                : "accent-primary-foreground"
           }
           type="monochrome"
         />
@@ -340,17 +350,17 @@ export function ComposerToolbarButton(props: {
         {
           maxWidth: props.maxWidth,
           minWidth: props.minWidth,
-          opacity: props.disabled ? 0.55 : pressed ? 0.72 : 1,
+          opacity: pressed ? 0.7 : 1,
         },
         props.style,
       ]}
     >
       {props.iconNode ? (
-        <View className="h-4 w-4 items-center justify-center">{props.iconNode}</View>
+        <View className="size-4 shrink-0 items-center justify-center">{props.iconNode}</View>
       ) : props.icon ? (
         <SymbolView
           name={props.icon}
-          size={16}
+          size={14}
           tintColorClassName={iconTintClassName}
           type="monochrome"
         />
@@ -358,28 +368,29 @@ export function ComposerToolbarButton(props: {
       {props.label ? (
         <Text
           className={cn(
-            "shrink text-center text-sm font-t3-bold",
+            "text-sm font-t3-medium",
+            props.textTransform === "uppercase" && "text-xs tracking-wider",
             variant === "primary"
               ? props.disabled
                 ? "text-foreground-muted"
                 : "text-primary-foreground"
-              : "text-foreground",
+              : variant === "danger"
+                ? "text-danger-foreground"
+                : "text-foreground",
           )}
-          ellipsizeMode="tail"
           numberOfLines={1}
-          style={{ textTransform: props.textTransform ?? "none" }}
         >
           {props.label}
         </Text>
       ) : null}
-      {props.showChevron === false ? null : (
+      {props.showChevron ? (
         <SymbolView
           name="chevron.down"
-          size={11}
+          size={10}
           tintColorClassName={iconTintClassName}
           type="monochrome"
         />
-      )}
+      ) : null}
     </Pressable>
   );
 }

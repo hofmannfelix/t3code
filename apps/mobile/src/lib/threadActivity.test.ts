@@ -37,6 +37,7 @@ import {
   setPendingUserInputCustomAnswer,
   isPendingUserInputOptionSelected,
   buildPendingUserInputAnswers,
+  gatherTurnTexts,
 } from "./threadActivity";
 
 const threadId = ThreadId.make("thread-1");
@@ -2612,5 +2613,135 @@ describe("MCP apps", () => {
 
   it("keeps a running app call an ordinary work row", () => {
     expect(feed("running").some((candidate) => candidate.type === "mcp-app")).toBe(false);
+  });
+});
+
+describe("gatherTurnTexts", () => {
+  const assistantText = (
+    id: string,
+    updatedAt: string,
+    ordinal: number,
+    run: RunId,
+    text: string,
+  ) =>
+    ({
+      ...base(id, updatedAt, ordinal),
+      runId: run,
+      type: "assistant_message" as const,
+      messageId: MessageId.make(`message-${id}`),
+      text,
+    }) as OrchestrationV2TurnItem;
+
+  it("joins each run's finished replies and resets at user messages", () => {
+    const run2 = RunId.make("run-2");
+    const feed = buildThreadFeed([
+      projected(userMessage("2026-08-29T00:00:00.000Z"), 0),
+      projected(assistantText("t1", "2026-08-29T00:00:01.000Z", 1, runId, "Teil eins."), 1),
+      projected(assistantText("t2", "2026-08-29T00:00:02.000Z", 2, runId, "Teil zwei."), 2),
+      projected(
+        {
+          ...userMessage("2026-08-29T00:00:03.000Z"),
+          id: TurnItemId.make("item-user-2"),
+          messageId: MessageId.make("message-user-2"),
+        },
+        3,
+      ),
+      projected(assistantText("t3", "2026-08-29T00:00:04.000Z", 4, run2, "Antwort zwei."), 4),
+    ]);
+
+    const texts = gatherTurnTexts(feed);
+    const messageOf = (needle: string) =>
+      feed.find(
+        (entry): entry is Extract<ThreadFeedEntry, { type: "message" }> =>
+          entry.type === "message" && entry.message.text.includes(needle),
+      )!;
+
+    expect(texts.get(messageOf("Teil eins").message.id)).toBe("Teil eins.\n\nTeil zwei.");
+    expect(texts.get(messageOf("Teil zwei").message.id)).toBe("Teil eins.\n\nTeil zwei.");
+    expect(texts.get(messageOf("Antwort zwei").message.id)).toBe("Antwort zwei.");
+  });
+
+  it("skips unfinished streaming messages instead of flushing the run", () => {
+    const streamingItem = {
+      ...assistantText("s1", "2026-08-29T00:00:02.000Z", 2, runId, "Teil eins."),
+      streaming: true,
+    };
+    const feed = buildThreadFeed([
+      projected(userMessage("2026-08-29T00:00:00.000Z"), 0),
+      projected(assistantText("t1", "2026-08-29T00:00:01.000Z", 1, runId, "Teil eins."), 1),
+      projected(streamingItem, 2),
+    ]);
+
+    const texts = gatherTurnTexts(feed);
+    const finished = feed.find(
+      (entry): entry is Extract<ThreadFeedEntry, { type: "message" }> =>
+        entry.type === "message" && entry.message.role === "assistant" && !entry.message.streaming,
+    )!;
+    const draft = feed.find(
+      (entry): entry is Extract<ThreadFeedEntry, { type: "message" }> =>
+        entry.type === "message" && entry.message.role === "assistant" && entry.message.streaming,
+    )!;
+    // The unfinished draft is excluded, but it must not flush the run either:
+    // the finished reply keeps the joined turn text.
+    expect(texts.get(finished.message.id)).toBe("Teil eins.");
+    expect(texts.has(draft.message.id)).toBe(false);
+  });
+
+  it("joins assistant messages across multiple runs within the same user prompt turn", () => {
+    const run1 = RunId.make("run-step-1");
+    const run2 = RunId.make("run-step-2");
+    const feed = buildThreadFeed([
+      projected(userMessage("2026-08-29T00:00:00.000Z"), 0),
+      projected(
+        assistantText("t1", "2026-08-29T00:00:01.000Z", 1, run1, "First paragraph from step 1."),
+        1,
+      ),
+      projected(
+        assistantText("t2", "2026-08-29T00:00:02.000Z", 2, run2, "Second paragraph from step 2."),
+        2,
+      ),
+    ]);
+
+    const texts = gatherTurnTexts(feed);
+    const m1 = feed.find(
+      (entry): entry is Extract<ThreadFeedEntry, { type: "message" }> =>
+        entry.type === "message" && entry.message.text.includes("First paragraph"),
+    )!;
+    const m2 = feed.find(
+      (entry): entry is Extract<ThreadFeedEntry, { type: "message" }> =>
+        entry.type === "message" && entry.message.text.includes("Second paragraph"),
+    )!;
+
+    expect(texts.get(m1.message.id)).toBe(
+      "First paragraph from step 1.\n\nSecond paragraph from step 2.",
+    );
+    expect(texts.get(m2.message.id)).toBe(
+      "First paragraph from step 1.\n\nSecond paragraph from step 2.",
+    );
+  });
+
+  it("gathers messages with null runId into turn text", () => {
+    const runlessAssistant = {
+      ...assistantText(
+        "rl1",
+        "2026-08-29T00:00:01.000Z",
+        1,
+        null as unknown as RunId,
+        "Standalone reply.",
+      ),
+      runId: null,
+    };
+    const feed = buildThreadFeed([
+      projected(userMessage("2026-08-29T00:00:00.000Z"), 0),
+      projected(runlessAssistant, 1),
+    ]);
+
+    const texts = gatherTurnTexts(feed);
+    const msg = feed.find(
+      (entry): entry is Extract<ThreadFeedEntry, { type: "message" }> =>
+        entry.type === "message" && entry.message.role === "assistant",
+    )!;
+
+    expect(texts.get(msg.message.id)).toBe("Standalone reply.");
   });
 });

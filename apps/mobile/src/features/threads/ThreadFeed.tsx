@@ -167,6 +167,7 @@ import {
   isContextCompactionActivityGroup,
   isContextHandoffActivityGroup,
   isSecretRequestActivityGroup,
+  gatherTurnTexts,
   type ThreadFeedEntry,
   type ThreadFeedLatestRun,
 } from "../../lib/threadActivity";
@@ -396,6 +397,8 @@ function ReadAloudButton(props: {
   readonly messageKey: string;
   readonly text: string;
   readonly environmentId: EnvironmentId;
+  readonly threadId?: ThreadId;
+  readonly threadTitle?: string;
   readonly iconColor: ColorValue;
 }) {
   const { speech, speak, stop } = useReadAloud(props.environmentId);
@@ -410,7 +413,14 @@ function ReadAloudButton(props: {
       }
       onPress={() => {
         if (isSpeakingThis) stop();
-        else speak({ key: props.messageKey, text: props.text });
+        else
+          speak({
+            key: props.messageKey,
+            text: props.text,
+            threadId: props.threadId ? String(props.threadId) : undefined,
+            environmentId: props.environmentId,
+            title: props.threadTitle,
+          });
       }}
       className="h-7 w-7 items-center justify-center"
     >
@@ -1560,6 +1570,7 @@ function renderFeedEntry(
     readonly workRowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
     readonly workGroupScrollPositions: Map<string, ThreadWorkGroupScrollPosition>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
+    readonly turnTextByMessageId: ReadonlyMap<string, string>;
     readonly unsettledTurnId: RunId | null;
     readonly failedRunIds: ReadonlySet<RunId>;
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
@@ -1712,6 +1723,8 @@ function renderFeedEntry(
     const isUser = message.role === "user";
     const presentation = resolveUserMessagePresentation(message);
     const renderedText = renderAssistantCitationsAsText(presentation.text);
+    // Read-aloud and copy cover the whole agent reply, not just this message.
+    const turnText = props.turnTextByMessageId.get(message.id) ?? renderedText;
     const styles = isUser ? markdownStyles.user : markdownStyles.assistant;
     const timestampLabel = formatMessageTime(isUser ? message.createdAt : message.updatedAt);
     const attachments = message.attachments ?? [];
@@ -1990,15 +2003,17 @@ function renderFeedEntry(
           <View className="mt-1 flex-row items-center gap-1">
             <CopyTextButton
               accessibilityLabel="Copy message"
-              text={renderedText}
+              text={turnText}
               tintColor={iconSubtleColor}
               buttonSize={28}
               iconSize={13}
             />
             <ReadAloudButton
               messageKey={message.id}
-              text={renderedText}
+              text={turnText}
               environmentId={props.environmentId}
+              threadId={props.threadId}
+              threadTitle={props.threadTitle}
               iconColor={iconSubtleColor}
             />
             {message.projectedItem ? (
@@ -2258,10 +2273,12 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const [viewportWidth, setViewportWidth] = useState(() =>
     props.layoutVariant === "split" ? 0 : windowWidth,
   );
+  const turnTextByMessageId = useMemo(() => gatherTurnTexts(props.feed), [props.feed]);
   useReadAloudAutoAnnounce({
     environmentId: props.environmentId,
     threadId: props.threadId,
     feed: props.feed,
+    turnTexts: turnTextByMessageId,
   });
   const [viewportHeight, setViewportHeight] = useState(0);
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
@@ -2807,10 +2824,16 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     [props.feed, props.latestRun],
   );
   const terminalAssistantMessageIds = useMemo(() => {
-    const terminalIdsByTurn = new Map<RunId, string>();
+    const terminalIdsByTurn = new Map<string, string>();
+    let unkeyedTurnIndex = 0;
     for (const entry of props.feed) {
-      if (entry.type === "message" && entry.message.role === "assistant" && entry.message.runId) {
-        terminalIdsByTurn.set(entry.message.runId, entry.message.id);
+      if (entry.type === "message") {
+        if (entry.message.role === "user") {
+          unkeyedTurnIndex += 1;
+        } else if (entry.message.role === "assistant") {
+          const key = entry.message.runId ?? `unkeyed:${unkeyedTurnIndex}`;
+          terminalIdsByTurn.set(key, entry.message.id);
+        }
       }
     }
     return new Set(terminalIdsByTurn.values());
@@ -3075,6 +3098,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             workRowSizing,
             workGroupScrollPositions,
             terminalAssistantMessageIds,
+            turnTextByMessageId,
             unsettledTurnId,
             failedRunIds,
             onCopyWorkRow,
@@ -3123,6 +3147,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       workRowSizing,
       workGroupScrollPositions,
       terminalAssistantMessageIds,
+      turnTextByMessageId,
       unsettledTurnId,
       failedRunIds,
       iconSubtleColor,
@@ -3146,6 +3171,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       props.environmentId,
       props.onUseArtifactTemplate,
       props.threadId,
+      turnTextByMessageId,
       props.threadTitle,
       props.skills,
       props.workspaceRoot,

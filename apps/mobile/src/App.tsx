@@ -22,11 +22,13 @@ import { RootStack } from "./Stack";
 import { appAtomRegistry } from "./state/atom-registry";
 import { OverlayPortalHost } from "./components/OverlayPortal";
 import { shouldHandleAppLink } from "./lib/appLinking";
+import { appNavigationRef } from "./lib/appNavigation";
 import { useMobileNavigationTheme } from "./lib/useMobileNavigationTheme";
 import { useUiRuntimeMemoryWarningGc } from "./lib/useUiRuntimeMemoryWarningGc";
 import { SubscriptionUsageCoordinator } from "./widgets/SubscriptionUsageCoordinator";
 import { VoiceInputProvider } from "./features/voice-input/VoiceInputProvider";
 import { GlobalVoiceInputControl } from "./features/voice-input/GlobalVoiceInputControl";
+import { GlobalAudioPlayerControl } from "./features/threads/ThreadAudioBar";
 import { NativeLayoutMetricsProvider } from "./native/native-layout-metrics";
 
 import "../global.css";
@@ -92,13 +94,19 @@ function AppContent() {
                 header (glass buttons, title, materials) is forced light even when
                 the system is in dark mode. */}
               <GlobalVoiceInputControl>
-                <NativeLayoutMetricsProvider>
-                  <IncomingShareProvider>
-                    <Navigation linking={appLinking} theme={navigationTheme} />
-                  </IncomingShareProvider>
-                  <ConfirmDialogHost />
-                  <ThreadArrangementHost />
-                </NativeLayoutMetricsProvider>
+                <GlobalAudioPlayerControl>
+                  <NativeLayoutMetricsProvider>
+                    <IncomingShareProvider>
+                      <Navigation
+                        ref={appNavigationRef}
+                        linking={appLinking}
+                        theme={navigationTheme}
+                      />
+                    </IncomingShareProvider>
+                    <ConfirmDialogHost />
+                    <ThreadArrangementHost />
+                  </NativeLayoutMetricsProvider>
+                </GlobalAudioPlayerControl>
               </GlobalVoiceInputControl>
               {/* Anchored-menu overlays render here — in-window, so the
                 keyboard stays up while a dropdown is open. */}

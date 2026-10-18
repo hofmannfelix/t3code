@@ -11,6 +11,7 @@ import {
   type VoiceRecorder,
 } from "./controller.ts";
 import type { PreparedVoiceTranscription, VoiceTranscriber } from "./transcription.ts";
+import { VoiceTranscriptionError } from "./transcription.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -427,6 +428,40 @@ describe("VoiceInputController", () => {
 
     expect(harness.controller.currentState.phase).toBe("error");
     expect(harness.controller.currentState.error).toContain("finish voice recording");
+  });
+
+  it("shows the transcription failure reason instead of a generic message", async () => {
+    const harness = createHarness({
+      getTranscriber: () => ({
+        prepare: async () =>
+          preparedTranscription(async () => {
+            throw new VoiceTranscriptionError(
+              "transcription-failed",
+              "Transcription request failed (401): Invalid API Key",
+            );
+          }),
+      }),
+    });
+    await harness.controller.start();
+    await harness.controller.stop();
+
+    expect(harness.controller.currentState.phase).toBe("error");
+    expect(harness.controller.currentState.error).toBe(
+      "Transcription request failed (401): Invalid API Key",
+    );
+  });
+
+  it("keeps the generic transcription message when the failure has no reason", async () => {
+    const harness = createHarness({
+      getTranscriber: () => ({
+        prepare: async () => preparedTranscription(() => Promise.reject(new Error("boom"))),
+      }),
+    });
+    await harness.controller.start();
+    await harness.controller.stop();
+
+    expect(harness.controller.currentState.phase).toBe("error");
+    expect(harness.controller.currentState.error).toBe("Could not transcribe this recording.");
   });
 
   it("ignores a late transcript after the draft owner changes", async () => {

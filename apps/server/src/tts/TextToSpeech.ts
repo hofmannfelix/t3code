@@ -3,15 +3,20 @@ import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as NodeBuffer from "node:buffer";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 
+import * as ServerConfig from "../config.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { isSecretRedacted, TTS_API_KEY_SECRET_NAME } from "../serverSettings.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
 
 /**
  * OpenAI-compatible defaults, applied when the settings fields are empty so a
@@ -34,12 +39,6 @@ const GEMINI_DEFAULT_VOICE = "Kore";
 /** Clips are replayable until they expire, then dropped lazily on the next use. */
 const CLIP_TTL_MS = 10 * 60_000;
 const MAX_CACHED_CLIPS = 32;
-
-interface CachedClip {
-  readonly bytes: Uint8Array;
-  readonly mimeType: string;
-  readonly expiresAt: number;
-}
 
 export interface TtsClip {
   readonly bytes: Uint8Array;
@@ -77,19 +76,70 @@ const pcmToWav = (pcm: Uint8Array, sampleRate: number, channels = 1, bitsPerSamp
   return Uint8Array.from(NodeBuffer.Buffer.concat([header, pcm]));
 };
 
+/** Google 429 bodies carry RetryInfo with a delay like "26s". */
+const retryDelayFromResponse = (response: HttpClientResponse.HttpClientResponse) =>
+  Effect.gen(function* () {
+    const body = (yield* response.json.pipe(Effect.orElseSucceed(() => ({})))) as {
+      error?: {
+        details?: Array<{ "@type"?: string; retryDelay?: string }>;
+      };
+    };
+    const retryInfo = body.error?.details?.find((detail) =>
+      (detail["@type"] ?? "").endsWith("RetryInfo"),
+    );
+    const seconds = Number.parseFloat(retryInfo?.retryDelay?.replace("s", "") ?? "0");
+    return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : 0;
+  });
+
 const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const http = yield* HttpClient.HttpClient;
   const crypto = yield* Crypto.Crypto;
+  const config = yield* ServerConfig.ServerConfig;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
 
-  const clips = new Map<string, CachedClip>();
+  // Clips persist under the state directory so every execution context that
+  // serves /api/tts-audio — the process that synthesized, a restart, or a
+  // request forwarded in through T3 Connect — reads the same bytes.
+  const clipsDir = path.join(config.stateDir, "tts-clips");
 
-  const dropExpiredClips = (now: number) => {
-    for (const [token, clip] of clips) {
-      if (clip.expiresAt <= now) clips.delete(token);
+  interface ClipFile {
+    readonly name: string;
+    readonly expiresAt: number;
+    readonly extension: string;
+  }
+
+  // File name layout: `<expiresAt>-<token>.<ext>`.
+  const listClipFiles = Effect.fn("TextToSpeech.listClipFiles")(function* () {
+    const names = yield* fs.readDirectory(clipsDir).pipe(Effect.orElseSucceed(() => []));
+    const files: Array<ClipFile> = [];
+    for (const name of names) {
+      const dot = name.lastIndexOf(".");
+      const stem = dot === -1 ? name : name.slice(0, dot);
+      const expiresAt = Number.parseInt(stem, 10);
+      if (Number.isFinite(expiresAt)) {
+        files.push({
+          name,
+          expiresAt,
+          extension: dot === -1 ? "" : name.slice(dot + 1),
+        });
+      }
     }
-  };
+    return files.sort((a, b) => a.expiresAt - b.expiresAt);
+  });
+
+  const removeClipFile = (file: ClipFile) =>
+    fs.remove(path.join(clipsDir, file.name), { force: true }).pipe(Effect.ignore);
+
+  const clipMimeType = (extension: string) =>
+    extension === "mp3"
+      ? "audio/mpeg"
+      : extension === "wav"
+        ? "audio/wav"
+        : "application/octet-stream";
+  const clipExtension = (mimeType: string) => (mimeType === "audio/mpeg" ? "mp3" : "wav");
 
   const resolveApiKey: Effect.Effect<string> = Effect.gen(function* () {
     const stored = yield* secretStore.get(TTS_API_KEY_SECRET_NAME).pipe(
@@ -118,77 +168,97 @@ const make = Effect.gen(function* () {
     const speechConfig = isGemini3
       ? { voiceConfig: { voice: input.voice } }
       : { voiceConfig: { prebuiltVoiceConfig: { voiceName: input.voice } } };
-    const request = yield* HttpClientRequest.post(
-      `${input.baseUrl.replace(/\/+$/, "")}/models/${input.model}:generateContent`,
-    ).pipe(
-      HttpClientRequest.setHeader("x-goog-api-key", input.apiKey),
-      HttpClientRequest.bodyJson({
-        contents: [{ parts: [{ text: input.text }] }],
-        generationConfig: {
-          responseModalities: ["AUDIO"],
-          speechConfig,
-        },
-      }),
-      Effect.mapError(
-        () =>
-          new TtsError({
-            reason: "provider-failed",
-            message: "The text-to-speech request could not be encoded.",
-          }),
-      ),
-    );
-    const response = yield* http.execute(request).pipe(
-      Effect.timeout("30 seconds"),
-      Effect.catch(() =>
-        Effect.fail(
-          new TtsError({
-            reason: "provider-failed",
-            message: "The text-to-speech provider could not be reached.",
-          }),
+    // Free-tier rate limits answer 429 on short bursts; honoring Google's
+    // RetryInfo (or backing off) turns those into delayed successes instead
+    // of silent fallbacks.
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; ; attempt++) {
+      const request = yield* HttpClientRequest.post(
+        `${input.baseUrl.replace(/\/+$/, "")}/models/${input.model}:generateContent`,
+      ).pipe(
+        HttpClientRequest.setHeader("x-goog-api-key", input.apiKey),
+        HttpClientRequest.bodyJson({
+          contents: [{ parts: [{ text: input.text }] }],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig,
+          },
+        }),
+        Effect.mapError(
+          () =>
+            new TtsError({
+              reason: "provider-failed",
+              message: "The text-to-speech request could not be encoded.",
+            }),
         ),
-      ),
-    );
-    if (response.status !== 200) {
-      return yield* new TtsError({
-        reason: "provider-failed",
-        message: `The text-to-speech provider rejected the request with status ${response.status}.`,
-      });
-    }
-    const json = yield* response.json.pipe(
-      Effect.catch(() =>
-        Effect.fail(
-          new TtsError({
-            reason: "provider-failed",
-            message: "The text-to-speech provider returned an unreadable response.",
-          }),
+      );
+      const response = yield* http.execute(request).pipe(
+        Effect.timeout("30 seconds"),
+        Effect.catch(() =>
+          Effect.fail(
+            new TtsError({
+              reason: "provider-failed",
+              message: "The text-to-speech provider could not be reached.",
+            }),
+          ),
         ),
-      ),
-    );
-    const inlineData = (
-      json as {
-        candidates?: Array<{
-          content?: { parts?: Array<{ inlineData?: { data?: string; mimeType?: string } }> };
-        }>;
+      );
+      if (response.status === 429 && attempt < MAX_ATTEMPTS) {
+        const retryAfterMs = yield* retryDelayFromResponse(response).pipe(
+          Effect.orElseSucceed(() => 3_000 * attempt),
+        );
+        yield* Effect.sleep(`${retryAfterMs} millis`);
+        continue;
       }
-    ).candidates?.[0]?.content?.parts?.[0]?.inlineData;
-    if (typeof inlineData?.data !== "string" || inlineData.data.length === 0) {
-      return yield* new TtsError({
-        reason: "provider-failed",
-        message: "The text-to-speech provider returned no audio.",
-      });
+      if (response.status !== 200) {
+        return yield* new TtsError({
+          reason: "provider-failed",
+          message: `The text-to-speech provider rejected the request with status ${response.status}.`,
+        });
+      }
+      const json = yield* response.json.pipe(
+        Effect.catch(() =>
+          Effect.fail(
+            new TtsError({
+              reason: "provider-failed",
+              message: "The text-to-speech provider returned an unreadable response.",
+            }),
+          ),
+        ),
+      );
+      const inlineData = (
+        json as {
+          candidates?: Array<{
+            content?: { parts?: Array<{ inlineData?: { data?: string; mimeType?: string } }> };
+          }>;
+        }
+      ).candidates?.[0]?.content?.parts?.[0]?.inlineData;
+      if (typeof inlineData?.data !== "string" || inlineData.data.length === 0) {
+        return yield* new TtsError({
+          reason: "provider-failed",
+          message: "The text-to-speech provider returned no audio.",
+        });
+      }
+      const bytes = new Uint8Array(NodeBuffer.Buffer.from(inlineData.data, "base64"));
+      // 3.x answers complete WAV; 2.5-era answers headerless PCM that needs the container.
+      if ((inlineData.mimeType ?? "").includes("wav")) {
+        return { bytes, mimeType: "audio/wav" as const };
+      }
+      const sampleRate = Number(/rate=(\d+)/.exec(inlineData.mimeType ?? "")?.[1] ?? 24_000);
+      return { bytes: pcmToWav(bytes, sampleRate), mimeType: "audio/wav" as const };
     }
-    const bytes = new Uint8Array(NodeBuffer.Buffer.from(inlineData.data, "base64"));
-    // 3.x answers complete WAV; 2.5-era answers headerless PCM that needs the container.
-    if ((inlineData.mimeType ?? "").includes("wav")) {
-      return { bytes, mimeType: "audio/wav" as const };
-    }
-    const sampleRate = Number(/rate=(\d+)/.exec(inlineData.mimeType ?? "")?.[1] ?? 24_000);
-    return { bytes: pcmToWav(bytes, sampleRate), mimeType: "audio/wav" as const };
   });
 
   const synthesize = Effect.fn("TextToSpeech.synthesize")(function* (input: {
     readonly text: string;
   }) {
+    const text = cleanTextForSpeech(input.text);
+    if (text.length === 0) {
+      return yield* new TtsError({
+        reason: "provider-failed",
+        message: "The requested text is empty.",
+      });
+    }
     const settings = yield* serverSettings.getSettings.pipe(
       Effect.mapError(
         () =>
@@ -208,7 +278,7 @@ const make = Effect.gen(function* () {
     const provider = settings.tts.provider.trim();
     if (provider === "gemini") {
       const gemini = yield* synthesizeWithGemini({
-        text: input.text,
+        text,
         baseUrl: settings.tts.baseUrl.trim() || GEMINI_DEFAULT_BASE_URL,
         model: settings.tts.model.trim() || GEMINI_DEFAULT_MODEL,
         voice: settings.tts.voice.trim() || GEMINI_DEFAULT_VOICE,
@@ -227,7 +297,7 @@ const make = Effect.gen(function* () {
       HttpClientRequest.bodyJson({
         model,
         voice,
-        input: input.text,
+        input: text,
         response_format: "mp3",
       }),
       Effect.mapError(
@@ -283,26 +353,48 @@ const make = Effect.gen(function* () {
       ),
     );
     const now = yield* Clock.currentTimeMillis;
-    dropExpiredClips(now);
-    while (clips.size >= MAX_CACHED_CLIPS) {
-      const oldest = clips.keys().next();
-      if (oldest.done) break;
-      clips.delete(oldest.value);
-    }
     const expiresAt = now + CLIP_TTL_MS;
-    clips.set(token, { bytes: input.bytes, mimeType: input.mimeType, expiresAt });
+    const storeFailed = () =>
+      new TtsError({
+        reason: "provider-failed",
+        message: "A text-to-speech clip could not be stored.",
+      });
+    // Expired clips go on the next store; the cache stays bounded by dropping
+    // the oldest entries first.
+    const existing = yield* listClipFiles();
+    const keep = existing
+      .filter((file) => file.expiresAt > now)
+      .slice(-Math.max(0, MAX_CACHED_CLIPS - 1));
+    for (const file of existing) {
+      if (!keep.includes(file)) yield* removeClipFile(file);
+    }
+    yield* fs.makeDirectory(clipsDir, { recursive: true }).pipe(Effect.mapError(storeFailed));
+    yield* fs
+      .writeFile(
+        path.join(clipsDir, `${expiresAt}-${token}.${clipExtension(input.mimeType)}`),
+        input.bytes,
+      )
+      .pipe(Effect.mapError(storeFailed));
     return { relativeUrl: `/api/tts-audio/${token}`, expiresAt };
   });
 
   const clip = (token: string): Effect.Effect<Option.Option<TtsClip>> =>
     Effect.gen(function* () {
-      const cached = clips.get(token);
-      if (cached === undefined) return Option.none();
-      if (cached.expiresAt <= (yield* Clock.currentTimeMillis)) {
-        clips.delete(token);
+      if (token.length === 0) return Option.none();
+      const files = yield* listClipFiles();
+      const file = files.find((file) =>
+        file.name.slice(0, file.name.lastIndexOf(".")).endsWith(`-${token}`),
+      );
+      if (file === undefined) return Option.none();
+      if (file.expiresAt <= (yield* Clock.currentTimeMillis)) {
+        yield* removeClipFile(file);
         return Option.none();
       }
-      return Option.some({ bytes: cached.bytes, mimeType: cached.mimeType });
+      const bytes = yield* fs
+        .readFile(path.join(clipsDir, file.name))
+        .pipe(Effect.orElseSucceed(() => new Uint8Array()));
+      if (bytes.length === 0) return Option.none();
+      return Option.some({ bytes, mimeType: clipMimeType(file.extension) });
     });
 
   return TextToSpeech.of({ synthesize, clip });

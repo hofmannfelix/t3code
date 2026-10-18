@@ -2,24 +2,16 @@ import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { useNavigation } from "@react-navigation/native";
 import { AsyncResult } from "effect/reactivity";
 import { useState } from "react";
-import {
-  Alert,
-  Linking,
-  Platform,
-  Pressable,
-  ScrollView,
-  View,
-} from "react-native";
+import { Alert, Linking, Platform, Pressable, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { AppText as Text, AppTextInput } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
-import {
-  type VoiceTranscriptionProvider,
-} from "../../persistence/mobile-preferences";
+import { type VoiceTranscriptionProvider } from "../../persistence/mobile-preferences";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
+import { GEMINI_TTS_DEFAULT_MODEL, GEMINI_TTS_DEFAULT_VOICE } from "../threads/deviceTts";
 import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
 import { SettingsSection } from "./components/SettingsSection";
 
@@ -59,14 +51,18 @@ export function SettingsVoiceInputRouteScreen() {
   const savePreferences = useAtomSet(updateMobilePreferencesAtom);
   const preferencesReady = AsyncResult.isSuccess(preferencesResult) && !preferencesResult.waiting;
 
-  const preferences = AsyncResult.isSuccess(preferencesResult) ? preferencesResult.value : undefined;
-  const currentProvider: VoiceTranscriptionProvider = preferences?.voiceTranscriptionProvider ?? "groq";
+  const preferences = AsyncResult.isSuccess(preferencesResult)
+    ? preferencesResult.value
+    : undefined;
+  const currentProvider: VoiceTranscriptionProvider =
+    preferences?.voiceTranscriptionProvider ?? "groq";
 
   const [apiKey, setApiKey] = useState(preferences?.voiceTranscriptionApiKey ?? "");
   const [showKey, setShowKey] = useState(false);
-  const [customEndpoint, setCustomEndpoint] = useState(preferences?.voiceTranscriptionCustomEndpoint ?? "");
+  const [customEndpoint, setCustomEndpoint] = useState(
+    preferences?.voiceTranscriptionCustomEndpoint ?? "",
+  );
   const [customModel, setCustomModel] = useState(preferences?.voiceTranscriptionCustomModel ?? "");
-  const [language, setLanguage] = useState(preferences?.voiceTranscriptionLanguage ?? "");
 
   const handleSelectProvider = (provider: VoiceTranscriptionProvider) => {
     savePreferences({ voiceTranscriptionProvider: provider });
@@ -87,9 +83,17 @@ export function SettingsVoiceInputRouteScreen() {
     savePreferences({ voiceTranscriptionCustomModel: value.trim() });
   };
 
-  const handleSaveLanguage = (value: string) => {
-    setLanguage(value);
-    savePreferences({ voiceTranscriptionLanguage: value.trim() });
+  const handleSelectReadAloudProvider = (provider: "server" | "gemini") => {
+    savePreferences({ readAloudProvider: provider });
+  };
+  const handleSaveReadAloudApiKey = (value: string) => {
+    savePreferences({ readAloudGeminiApiKey: value.trim() });
+  };
+  const handleSaveReadAloudModel = (value: string) => {
+    savePreferences({ readAloudGeminiModel: value.trim() });
+  };
+  const handleSaveReadAloudVoice = (value: string) => {
+    savePreferences({ readAloudGeminiVoice: value.trim() });
   };
 
   const openUrl = (url: string) => {
@@ -110,6 +114,9 @@ export function SettingsVoiceInputRouteScreen() {
         contentInsetAdjustmentBehavior="automatic"
         showsVerticalScrollIndicator={false}
         className="flex-1"
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
+        automaticallyAdjustKeyboardInsets
         contentContainerClassName="gap-5 px-5 pt-4"
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
       >
@@ -128,9 +135,7 @@ export function SettingsVoiceInputRouteScreen() {
         </SettingsSection>
 
         {currentProvider === "groq" || currentProvider === "openai" ? (
-          <SettingsSection
-            title={currentProvider === "groq" ? "Groq API Key" : "OpenAI API Key"}
-          >
+          <SettingsSection title={currentProvider === "groq" ? "Groq API Key" : "OpenAI API Key"}>
             <View className="gap-3 p-4">
               <View className="relative">
                 <AppTextInput
@@ -248,21 +253,112 @@ export function SettingsVoiceInputRouteScreen() {
           </View>
         ) : null}
 
-        <SettingsSection title="Language (Optional)">
-          <View className="gap-2 p-4">
+        <ReadAloudSection
+          provider={preferences?.readAloudProvider ?? "server"}
+          apiKey={preferences?.readAloudGeminiApiKey ?? ""}
+          model={preferences?.readAloudGeminiModel ?? ""}
+          voice={preferences?.readAloudGeminiVoice ?? ""}
+          preferencesReady={preferencesReady}
+          onProviderChange={handleSelectReadAloudProvider}
+          onApiKeyChange={handleSaveReadAloudApiKey}
+          onModelChange={handleSaveReadAloudModel}
+          onVoiceChange={handleSaveReadAloudVoice}
+        />
+      </ScrollView>
+    </View>
+  );
+}
+
+interface ReadAloudSectionProps {
+  readonly apiKey: string;
+  readonly model: string;
+  readonly preferencesReady: boolean;
+  readonly provider: "server" | "gemini";
+  readonly voice: string;
+  readonly onApiKeyChange: (value: string) => void;
+  readonly onModelChange: (value: string) => void;
+  readonly onProviderChange: (provider: "server" | "gemini") => void;
+  readonly onVoiceChange: (value: string) => void;
+}
+
+const READ_ALOUD_PROVIDER_OPTIONS = [
+  {
+    id: "server" as const,
+    label: "Paired server",
+    description: "Uses the text-to-speech provider configured on your Mac.",
+  },
+  {
+    id: "gemini" as const,
+    label: "This device (Gemini)",
+    description: "Synthesizes directly on the phone with its own Gemini API key.",
+  },
+];
+
+function ReadAloudSection(props: ReadAloudSectionProps) {
+  const [showKey, setShowKey] = useState(false);
+  return (
+    <View>
+      <SettingsSection title="Read aloud">
+        {READ_ALOUD_PROVIDER_OPTIONS.map((option, index) => (
+          <SettingsChoiceRow
+            key={option.id}
+            label={option.label}
+            description={option.description}
+            selected={props.provider === option.id}
+            separated={index > 0}
+            disabled={!props.preferencesReady}
+            onPress={() => props.onProviderChange(option.id)}
+          />
+        ))}
+      </SettingsSection>
+      {props.provider === "gemini" ? (
+        <SettingsSection title="Gemini API Key">
+          <View className="gap-3 p-4">
+            <View className="relative">
+              <AppTextInput
+                value={props.apiKey}
+                onChangeText={props.onApiKeyChange}
+                placeholder="AIza..."
+                secureTextEntry={!showKey}
+                autoCapitalize="none"
+                autoCorrect={false}
+                spellCheck={false}
+                className="pr-12"
+              />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={showKey ? "Hide API Key" : "Show API Key"}
+                onPress={() => setShowKey(!showKey)}
+                className="absolute right-3 top-3.5 p-1"
+              >
+                <SymbolView
+                  name={showKey ? "eye.slash" : "eye"}
+                  size={20}
+                  tintColorClassName="accent-icon"
+                />
+              </Pressable>
+            </View>
+            <Text className="text-sm text-foreground-muted">
+              Gemini 3.x TTS speaks from this phone with your own key. Get one at{" "}
+              <Text className="text-accent">aistudio.google.com</Text>.
+            </Text>
             <AppTextInput
-              value={language}
-              onChangeText={handleSaveLanguage}
-              placeholder="Auto-detect (or e.g. de, en, es, fr)"
+              value={props.model}
+              onChangeText={props.onModelChange}
+              placeholder={`Model (default ${GEMINI_TTS_DEFAULT_MODEL})`}
               autoCapitalize="none"
               autoCorrect={false}
             />
-            <Text className="text-sm text-foreground-muted">
-              Leave empty for automatic language detection, or provide an ISO-639-1 language code.
-            </Text>
+            <AppTextInput
+              value={props.voice}
+              onChangeText={props.onVoiceChange}
+              placeholder={`Voice (default ${GEMINI_TTS_DEFAULT_VOICE})`}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
           </View>
         </SettingsSection>
-      </ScrollView>
+      ) : null}
     </View>
   );
 }

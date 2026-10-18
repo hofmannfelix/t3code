@@ -447,30 +447,52 @@ export const layerAssetRoute = HttpRouter.add(
   }),
 );
 
-export const layerTtsAudioRoute = HttpRouter.add(
-  "GET",
-  "/api/tts-audio/*",
-  Effect.gen(function* () {
-    const request = yield* HttpServerRequest.HttpServerRequest;
-    const url = HttpServerRequest.toURL(request);
-    if (Option.isNone(url)) {
-      return HttpServerResponse.text("Bad Request", { status: 400 });
-    }
-    const token = url.value.pathname.slice("/api/tts-audio/".length);
-    const textToSpeech = yield* TextToSpeech.TextToSpeech;
-    const clip = yield* token ? textToSpeech.clip(token) : Effect.succeedNone;
-    if (Option.isNone(clip)) {
-      return HttpServerResponse.text("Not Found", {
-        status: 404,
-        headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
-      });
-    }
-    return HttpServerResponse.uint8Array(clip.value.bytes, {
-      contentType: clip.value.mimeType,
-      headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+// Serves a synthesized clip with Byte-Range support: iOS AVFoundation (expo-audio)
+// and WebKit only play HTTP media that answers Range requests with 206.
+const serveTtsClip = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const url = HttpServerRequest.toURL(request);
+  if (Option.isNone(url)) {
+    return HttpServerResponse.text("Bad Request", { status: 400 });
+  }
+  const token = url.value.pathname.slice("/api/tts-audio/".length);
+  const textToSpeech = yield* TextToSpeech.TextToSpeech;
+  const clip = yield* token ? textToSpeech.clip(token) : Effect.succeedNone;
+  const noStoreHeaders = {
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+  };
+  if (Option.isNone(clip) || clip.value.bytes.length === 0) {
+    return HttpServerResponse.text("Not Found", { status: 404, headers: noStoreHeaders });
+  }
+  const headers = { ...noStoreHeaders, "accept-ranges": "bytes" };
+  const total = BigInt(clip.value.bytes.length);
+  const range =
+    request.method === "GET" && request.headers.range
+      ? assetByteRange(request.headers.range, total)
+      : undefined;
+  if (range?._tag === "Unsatisfiable") {
+    return HttpServerResponse.empty({
+      status: 416,
+      headers: { ...headers, "Content-Range": `bytes */${total}` },
     });
-  }),
-);
+  }
+  if (range?._tag === "Range") {
+    const start = Number(range.offset);
+    const end = start + Number(range.bytesToRead);
+    return HttpServerResponse.uint8Array(clip.value.bytes.subarray(start, end), {
+      status: 206,
+      contentType: clip.value.mimeType,
+      headers: { ...headers, "Content-Range": range.contentRange },
+    });
+  }
+  return HttpServerResponse.uint8Array(clip.value.bytes, {
+    contentType: clip.value.mimeType,
+    headers,
+  });
+});
+
+export const layerTtsAudioRoute = HttpRouter.add("GET", "/api/tts-audio/*", serveTtsClip);
 
 export const layerAttachmentUploadRoute = HttpRouter.add(
   "POST",

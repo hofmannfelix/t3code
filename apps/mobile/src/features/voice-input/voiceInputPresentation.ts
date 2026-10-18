@@ -46,7 +46,9 @@ export function resolveVoiceComposerPresentation(
       return {
         leadingAction: "cancel",
         trailingAction: "confirm",
-        showsSend: false,
+        // Gemini-style: while recording, the send button stops the recording,
+        // transcribes, and sends the message right away.
+        showsSend: true,
         statusKind: "active",
         statusLabel: `Recording ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`,
         confirmationEnabled: true,

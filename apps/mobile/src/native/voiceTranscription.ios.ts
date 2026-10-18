@@ -24,7 +24,15 @@ function wrapError(
     return cause;
   }
 
-  return new VoiceTranscriptionError(code, message, { cause });
+  // The JSI transcription binding rejects with a plain string, so native
+  // failure reasons only reach the user when wrapped into the message.
+  const detail =
+    typeof cause === "string"
+      ? cause.trim()
+      : cause instanceof Error && cause.message.trim()
+        ? cause.message.trim()
+        : "";
+  return new VoiceTranscriptionError(code, detail ? `${message} (${detail})` : message, { cause });
 }
 
 function getNativeErrorCode(error: unknown): string | undefined {
@@ -34,7 +42,6 @@ function getNativeErrorCode(error: unknown): string | undefined {
 
   return typeof error.code === "string" ? error.code : undefined;
 }
-
 
 export function getVoiceTranscriber(preferences?: Preferences): VoiceTranscriber | null {
   const provider = preferences?.voiceTranscriptionProvider;
@@ -47,7 +54,10 @@ export function getVoiceTranscriber(preferences?: Preferences): VoiceTranscriber
   }
 
   // If an API key or custom endpoint is configured, prioritize Whisper
-  if (preferences?.voiceTranscriptionApiKey?.trim() || preferences?.voiceTranscriptionCustomEndpoint?.trim()) {
+  if (
+    preferences?.voiceTranscriptionApiKey?.trim() ||
+    preferences?.voiceTranscriptionCustomEndpoint?.trim()
+  ) {
     return getWhisperVoiceTranscriber(preferences);
   }
 

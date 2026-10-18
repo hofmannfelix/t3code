@@ -30,6 +30,7 @@ import {
   type WorkLogPresentationEntry,
   type WorkLogToolLifecycleStatus,
 } from "@t3tools/client-runtime/work-log/presentation";
+import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import {
   resolveT3McpToolDefinition,
   resolveT3McpToolPresentation,
@@ -1897,4 +1898,41 @@ export function buildThreadFeed(
     else entries.splice(insertionIndex, 0, entry);
   }
   return groupAdjacentActivities(entries);
+}
+
+/**
+ * Read-aloud and copy cover the whole agent reply: an assistant turn renders as
+ * one or more messages (possibly spanning multiple execution steps or runs).
+ * Every finished assistant message maps to the texts of the finished replies
+ * in that turn joined in order. Turns end at the next user message.
+ */
+export function gatherTurnTexts(
+  entries: ReadonlyArray<ThreadFeedEntry>,
+): ReadonlyMap<string, string> {
+  const map = new Map<string, string>();
+  let texts: Array<string> = [];
+  let keys: Array<string> = [];
+  const flush = () => {
+    if (texts.length > 0) {
+      const joined = texts.join("\n\n");
+      for (const key of keys) map.set(key, joined);
+    }
+    texts = [];
+    keys = [];
+  };
+  for (const entry of entries) {
+    if (entry.type !== "message") continue;
+    const message = entry.message;
+    if (message.role === "user") {
+      flush();
+      continue;
+    }
+    if (message.streaming) continue;
+    const cleaned = renderAssistantCitationsAsText(message.text).trim();
+    if (cleaned.length === 0) continue;
+    texts.push(cleaned);
+    keys.push(message.id);
+  }
+  flush();
+  return map;
 }
