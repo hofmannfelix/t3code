@@ -1,5 +1,5 @@
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useMemo, useRef } from "react";
 import { ActivityIndicator, Platform, Pressable, View } from "react-native";
 import Animated, { FadeInUp, FadeOutUp, ReduceMotion } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -185,10 +185,14 @@ export function ThreadAudioBar(props?: {
 function ArmedThreadAudioWatcher(props: { readonly target: ArmedReadAloudTarget }) {
   const { target } = props;
   const { speak } = useReadAloud(target.environmentId);
-  const threadDetailState = useThreadDetail({
-    environmentId: target.environmentId,
-    threadId: target.threadId as ThreadId,
-  });
+  const targetSpec = useMemo(
+    () => ({
+      environmentId: target.environmentId,
+      threadId: target.threadId as ThreadId,
+    }),
+    [target.environmentId, target.threadId],
+  );
+  const threadDetailState = useThreadDetail(targetSpec);
 
   const lastSeenSpokenMessageIdRef = useRef<string | null>(null);
 
@@ -210,6 +214,7 @@ function ArmedThreadAudioWatcher(props: { readonly target: ArmedReadAloudTarget 
               threadId: target.threadId,
               environmentId: target.environmentId ?? undefined,
               title: target.threadTitle ?? "Antwort",
+              projectTitle: target.projectTitle,
             });
           }
           break;

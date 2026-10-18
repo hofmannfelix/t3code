@@ -119,8 +119,10 @@ export interface ArmedReadAloudTarget {
 
 const armedTargets = new Map<string, ArmedReadAloudTarget>();
 const armedTargetListeners = new Set<() => void>();
+let cachedArmedTargets: ReadonlyArray<ArmedReadAloudTarget> = Object.freeze([]);
 
 const notifyArmedTargetListeners = () => {
+  cachedArmedTargets = Object.freeze(Array.from(armedTargets.values()));
   for (const listener of armedTargetListeners) {
     listener();
   }
@@ -199,12 +201,20 @@ export const disarmReadAloudOnNextReply = (threadId: string) => {
   }
 };
 
+export const clearArmedReadAloudTargets = () => {
+  if (armedTargets.size > 0) {
+    armedTargets.clear();
+    cachedArmedTargets = Object.freeze([]);
+    notifyArmedTargetListeners();
+  }
+};
+
 export const isReadAloudArmedOnNextReply = (threadId: string) => {
   return armedTargets.has(threadId);
 };
 
 export const getArmedReadAloudTargets = (): ReadonlyArray<ArmedReadAloudTarget> => {
-  return Array.from(armedTargets.values());
+  return cachedArmedTargets;
 };
 
 export const useArmedReadAloudTargets = (): ReadonlyArray<ArmedReadAloudTarget> => {

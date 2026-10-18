@@ -794,4 +794,19 @@ describe("useReadAloudAutoAnnounce", () => {
     expect(isReadAloudArmedOnNextReply("thread-42")).toBe(false);
     expect(getArmedReadAloudTargets()).toHaveLength(0);
   });
+
+  it("provides referentially stable snapshots from getArmedReadAloudTargets until changed", () => {
+    const initial = getArmedReadAloudTargets();
+    expect(getArmedReadAloudTargets()).toBe(initial);
+
+    armReadAloudOnNextReply("thread-stability-1");
+    const afterArm = getArmedReadAloudTargets();
+    expect(afterArm).not.toBe(initial);
+    expect(getArmedReadAloudTargets()).toBe(afterArm);
+
+    disarmReadAloudOnNextReply("thread-stability-1");
+    const afterDisarm = getArmedReadAloudTargets();
+    expect(afterDisarm).not.toBe(afterArm);
+    expect(getArmedReadAloudTargets()).toBe(afterDisarm);
+  });
 });
