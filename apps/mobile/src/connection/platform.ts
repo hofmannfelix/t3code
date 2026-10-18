@@ -27,7 +27,7 @@ import { appAtomRegistry } from "../state/atom-registry";
 import { clearThreadOutboxEnvironment } from "../state/thread-outbox-removal";
 import { clearComposerDraftsEnvironment } from "../state/use-composer-drafts";
 import { clearThreadComposerErrorsForEnvironment } from "../state/thread-composer-error";
-import { isAudioSessionOrPlaybackActive } from "../features/threads/useReadAloud";
+import { isAudioSessionOrPlaybackActive } from "../lib/audioActiveTracker";
 import { mobileApplicationActiveWakeup } from "./app-state-wakeups";
 import * as ConnectionStorage from "./storage";
 

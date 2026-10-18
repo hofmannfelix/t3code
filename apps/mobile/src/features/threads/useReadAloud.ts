@@ -1,3 +1,7 @@
+import {
+  registerAudioPlaybackActivePredicate,
+  isAudioSessionOrPlaybackActive,
+} from "../../lib/audioActiveTracker";
 import { DEFAULT_SERVER_SETTINGS, type EnvironmentId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -901,8 +905,11 @@ let answerBlockQueue: ReadItem[] = [];
 let currentAnswerBlock: ReadItem | null = null;
 let currentBlockChunks: QueueEntry[] = [];
 
-export const isAudioSessionOrPlaybackActive = (): boolean =>
-  isAudioSessionActive || currentSpeech.phase !== null || answerBlockQueue.length > 0;
+export { isAudioSessionOrPlaybackActive };
+
+registerAudioPlaybackActivePredicate(
+  () => isAudioSessionActive || currentSpeech.phase !== null || answerBlockQueue.length > 0,
+);
 
 let enqueueCounter = 0;
 let lastFailureAt = 0;
