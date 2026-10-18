@@ -95,6 +95,9 @@ export function SettingsVoiceInputRouteScreen() {
   const handleSaveReadAloudVoice = (value: string) => {
     savePreferences({ readAloudGeminiVoice: value.trim() });
   };
+  const handleSelectWaitingAudio = (waitingAudio: "music" | "silent") => {
+    savePreferences({ readAloudWaitingAudio: waitingAudio });
+  };
 
   const openUrl = (url: string) => {
     Linking.openURL(url).catch(() => {
@@ -258,11 +261,13 @@ export function SettingsVoiceInputRouteScreen() {
           apiKey={preferences?.readAloudGeminiApiKey ?? ""}
           model={preferences?.readAloudGeminiModel ?? ""}
           voice={preferences?.readAloudGeminiVoice ?? ""}
+          waitingAudio={preferences?.readAloudWaitingAudio ?? "music"}
           preferencesReady={preferencesReady}
           onProviderChange={handleSelectReadAloudProvider}
           onApiKeyChange={handleSaveReadAloudApiKey}
           onModelChange={handleSaveReadAloudModel}
           onVoiceChange={handleSaveReadAloudVoice}
+          onWaitingAudioChange={handleSelectWaitingAudio}
         />
       </ScrollView>
     </View>
@@ -275,11 +280,27 @@ interface ReadAloudSectionProps {
   readonly preferencesReady: boolean;
   readonly provider: "server" | "gemini";
   readonly voice: string;
+  readonly waitingAudio: "music" | "silent";
   readonly onApiKeyChange: (value: string) => void;
   readonly onModelChange: (value: string) => void;
   readonly onProviderChange: (provider: "server" | "gemini") => void;
   readonly onVoiceChange: (value: string) => void;
+  readonly onWaitingAudioChange: (waitingAudio: "music" | "silent") => void;
 }
+
+const WAITING_AUDIO_OPTIONS = [
+  {
+    id: "music" as const,
+    label: "Elevator music",
+    description:
+      "Plays elevator music while waiting for the assistant's reply to keep the audio session active.",
+  },
+  {
+    id: "silent" as const,
+    label: "Silent audio track (Nullmusik)",
+    description: "Plays an inaudible track to keep the audio session active without sound.",
+  },
+];
 
 const READ_ALOUD_PROVIDER_OPTIONS = [
   {
@@ -359,6 +380,19 @@ function ReadAloudSection(props: ReadAloudSectionProps) {
           </View>
         </SettingsSection>
       ) : null}
+      <SettingsSection title="Background audio while waiting">
+        {WAITING_AUDIO_OPTIONS.map((option, index) => (
+          <SettingsChoiceRow
+            key={option.id}
+            label={option.label}
+            description={option.description}
+            selected={props.waitingAudio === option.id}
+            separated={index > 0}
+            disabled={!props.preferencesReady}
+            onPress={() => props.onWaitingAudioChange(option.id)}
+          />
+        ))}
+      </SettingsSection>
     </View>
   );
 }

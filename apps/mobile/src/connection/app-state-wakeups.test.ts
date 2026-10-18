@@ -18,4 +18,14 @@ describe("mobileApplicationActiveWakeup", () => {
       mobileApplicationActiveWakeup(20_000, 20_000 + MOBILE_BACKGROUND_RECONNECT_AFTER_MS),
     ).toBe("application-active-reconnect");
   });
+
+  it("keeps a fast probe even after long backgrounding if an audio session is active", () => {
+    expect(
+      mobileApplicationActiveWakeup(
+        20_000,
+        20_000 + MOBILE_BACKGROUND_RECONNECT_AFTER_MS + 60_000,
+        true,
+      ),
+    ).toBe("application-active-probe");
+  });
 });

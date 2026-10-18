@@ -68,6 +68,7 @@ import {
   type ThreadListV2ListItem,
 } from "../threads/threadListV2";
 import { useThreadListV2ShelfPreferences } from "../threads/use-thread-list-v2-shelf-preferences";
+import { useIsAudioBarVisible } from "../threads/useReadAloud";
 import type { HomeListFilterMenuEnvironment } from "./home-list-filter-menu";
 import {
   buildHomeProjectScopes,
@@ -281,6 +282,7 @@ export function HomeScreen(props: HomeScreenProps) {
   const queuedThreadKeys = useQueuedThreadKeys();
   const openSwipeableRef = useRef<SwipeableMethods | null>(null);
   const insets = useSafeAreaInsets();
+  const isAudioBarVisible = useIsAudioBarVisible();
   const { fabClearance } = useAndroidControlSizing();
   const screenMetrics = useNativeLayoutMetrics();
   const contentSideInsets = usesNativeWorkspaceColumns
@@ -916,7 +918,11 @@ export function HomeScreen(props: HomeScreenProps) {
           )}
           style={{
             paddingBottom: Platform.OS === "ios" ? iosBottomClearance : Math.max(insets.bottom, 24),
-            paddingTop: NATIVE_LIQUID_GLASS_SUPPORTED ? insets.top + 72 : 0,
+            paddingTop: NATIVE_LIQUID_GLASS_SUPPORTED
+              ? insets.top + (isAudioBarVisible ? 128 : 72)
+              : isAudioBarVisible
+                ? 56
+                : 0,
             paddingLeft: 32 + (contentSideInsets?.left ?? 0),
             paddingRight: 32 + (contentSideInsets?.right ?? 0),
           }}
@@ -951,7 +957,16 @@ export function HomeScreen(props: HomeScreenProps) {
     );
   }
 
-  const listHeader = Platform.OS === "ios" ? undefined : <HomeTopContentSpacer />;
+  const listHeader =
+    Platform.OS === "ios" ? (
+      isAudioBarVisible ? (
+        <View style={{ height: 56 }} />
+      ) : undefined
+    ) : isAudioBarVisible ? (
+      <View style={{ height: 72 }} />
+    ) : (
+      <HomeTopContentSpacer />
+    );
 
   // Project scoping lives in the header filter menu (no inline chip row on
   // mobile — the menu is the one filter surface).

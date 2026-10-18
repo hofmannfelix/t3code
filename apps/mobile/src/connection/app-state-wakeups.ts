@@ -10,7 +10,11 @@ export type MobileApplicationActiveWakeup = Extract<
 export function mobileApplicationActiveWakeup(
   backgroundedAtMs: number | null,
   activeAtMs: number,
+  isAudioSessionActive: boolean = false,
 ): MobileApplicationActiveWakeup {
+  if (isAudioSessionActive) {
+    return "application-active-probe";
+  }
   return backgroundedAtMs !== null &&
     activeAtMs - backgroundedAtMs >= MOBILE_BACKGROUND_RECONNECT_AFTER_MS
     ? "application-active-reconnect"

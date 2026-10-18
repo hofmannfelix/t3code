@@ -65,6 +65,17 @@ export interface Preferences {
   readonly readAloudGeminiModel?: string;
   readonly readAloudGeminiVoice?: string;
   readonly readAloudAutoSpeak?: boolean;
+  /** Waiting audio while audio session is active: "music" (default elevator music) or "silent" (empty track keeping session alive). */
+  readonly readAloudWaitingAudio?: "music" | "silent";
+  /** Whether an audio session was active when the app was last running. */
+  readonly audioSessionActive?: boolean;
+  /** Active thread/project target for restoring the audio session upon app launch. */
+  readonly audioSessionTarget?: {
+    readonly environmentId?: string | null;
+    readonly threadId?: string | null;
+    readonly threadTitle?: string | null;
+    readonly projectTitle?: string | null;
+  } | null;
 }
 
 export class MobilePreferencesLoadError extends Schema.TaggedError<MobilePreferencesLoadError>()(
@@ -137,6 +148,14 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     readAloudGeminiModel?: string;
     readAloudGeminiVoice?: string;
     readAloudAutoSpeak?: boolean;
+    readAloudWaitingAudio?: "music" | "silent";
+    audioSessionActive?: boolean;
+    audioSessionTarget?: {
+      readonly environmentId?: string | null;
+      readonly threadId?: string | null;
+      readonly threadTitle?: string | null;
+      readonly projectTitle?: string | null;
+    } | null;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -260,6 +279,34 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.readAloudAutoSpeak === "boolean") {
     preferences.readAloudAutoSpeak = parsed.readAloudAutoSpeak;
+  }
+  if (parsed.readAloudWaitingAudio === "music" || parsed.readAloudWaitingAudio === "silent") {
+    preferences.readAloudWaitingAudio = parsed.readAloudWaitingAudio;
+  }
+  if (typeof parsed.audioSessionActive === "boolean") {
+    preferences.audioSessionActive = parsed.audioSessionActive;
+  }
+  if (parsed.audioSessionTarget && typeof parsed.audioSessionTarget === "object") {
+    preferences.audioSessionTarget = {
+      environmentId:
+        typeof parsed.audioSessionTarget.environmentId === "string"
+          ? parsed.audioSessionTarget.environmentId
+          : null,
+      threadId:
+        typeof parsed.audioSessionTarget.threadId === "string"
+          ? parsed.audioSessionTarget.threadId
+          : null,
+      threadTitle:
+        typeof parsed.audioSessionTarget.threadTitle === "string"
+          ? parsed.audioSessionTarget.threadTitle
+          : null,
+      projectTitle:
+        typeof parsed.audioSessionTarget.projectTitle === "string"
+          ? parsed.audioSessionTarget.projectTitle
+          : null,
+    };
+  } else if (parsed.audioSessionTarget === null) {
+    preferences.audioSessionTarget = null;
   }
 
   return preferences;

@@ -36,6 +36,10 @@ import {
 import { createLazyVoiceRecorder, type LazyVoiceRecorder } from "./lazyVoiceRecorder";
 import { normalizeVoiceInputDecibels, VOICE_WAVEFORM_SAMPLE_COUNT } from "./voiceInputMetering";
 import { VoiceInputSession } from "./voiceInputSession";
+import {
+  pauseAudioForVoiceRecording,
+  resumeAudioAfterVoiceRecording,
+} from "../threads/useReadAloud";
 
 const INITIAL_STATE: VoiceInputState = { phase: "idle", error: null, errorAction: null };
 const VOICE_METERING_INTERVAL_MS = 80;
@@ -74,11 +78,13 @@ async function releaseVoiceRecordingAudio(): Promise<void> {
     // Expo does not deactivate AVAudioSession when recording stops or its
     // category changes. Explicit deactivation resumes interrupted app audio.
     await setIsAudioActiveAsync(false);
+    await resumeAudioAfterVoiceRecording();
   }
 }
 
 async function configureVoiceRecordingAudio(): Promise<void> {
   try {
+    pauseAudioForVoiceRecording();
     await setAudioModeAsync({
       allowsRecording: true,
       interruptionMode: "doNotMix",

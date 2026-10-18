@@ -230,12 +230,9 @@ export function AgentActivity(
       <Image systemName={systemName} modifiers={[resizable()]} />
     </HStack>
   );
-
-  // Single-line row used by every presentation: glyph, title, inline project,
-  // status. The project and status carry layoutPriority(1) so when space runs
-  // out it's the title that truncates, never the (short) project name or the
-  // status label. Single-line keeps rows inside the expanded island's hard
-  // height budget (~160pt) and lets the banner fit more agents.
+  // Single-line row used by every presentation: glyph, project, inline thread summary/title,
+  // status. The project name carries the prominent white label, while the thread title/summary
+  // follows behind with secondary style.
   const renderCompactRow = (row: AgentActivityRowProps) => (
     <HStack spacing={7} alignment="center">
       <Text
@@ -245,10 +242,10 @@ export function AgentActivity(
           lineLimit(1),
         ]}
       >
-        {row.threadTitle}
+        {row.projectTitle}
       </Text>
       <Text modifiers={[font({ size: 11 }), foregroundStyle(secondaryForeground), lineLimit(1)]}>
-        {row.projectTitle}
+        {row.threadTitle}
       </Text>
       <Spacer minLength={8} />
       {row.isAudioActive ? (
@@ -304,6 +301,25 @@ export function AgentActivity(
       )}
     </HStack>
   );
+
+  const resolveRowLink = (row: AgentActivityRowProps): string | null => {
+    if (row.deepLink && row.deepLink.startsWith("/") && !row.deepLink.startsWith("//")) {
+      return `t3code://${row.deepLink.slice(1)}`;
+    }
+    if (row.deepLink && row.deepLink.startsWith("t3code://")) {
+      return row.deepLink;
+    }
+    return null;
+  };
+
+  const renderInteractiveRow = (row: AgentActivityRowProps) => {
+    const link = resolveRowLink(row);
+    const content = renderCompactRow(row);
+    if (link) {
+      return <Link destination={link}>{content}</Link>;
+    }
+    return content;
+  };
 
   // The branded T3 mark. `assetName` resolves the template image set bundled in
   // the widget extension's asset catalog. Image views only honor `resizable`
@@ -391,11 +407,11 @@ export function AgentActivity(
             </Link>
           </HStack>
         </ZStack>
-        {row0 ? renderCompactRow(row0) : null}
-        {row1 ? renderCompactRow(row1) : null}
-        {row2 ? renderCompactRow(row2) : null}
-        {row3 ? renderCompactRow(row3) : null}
-        {row4 ? renderCompactRow(row4) : null}
+        {row0 ? renderInteractiveRow(row0) : null}
+        {row1 ? renderInteractiveRow(row1) : null}
+        {row2 ? renderInteractiveRow(row2) : null}
+        {row3 ? renderInteractiveRow(row3) : null}
+        {row4 ? renderInteractiveRow(row4) : null}
       </VStack>
     ),
     // Compact card for the watchOS Smart Stack + CarPlay (the `.small` family):
@@ -423,6 +439,11 @@ export function AgentActivity(
                 foregroundStyle(primaryForeground),
                 lineLimit(1),
               ]}
+            >
+              {row0.projectTitle}
+            </Text>
+            <Text
+              modifiers={[font({ size: 11 }), foregroundStyle(secondaryForeground), lineLimit(1)]}
             >
               {row0.threadTitle}
             </Text>
@@ -510,9 +531,9 @@ export function AgentActivity(
             : [padding({ vertical: 2, horizontal: 8 })]
         }
       >
-        {row0 ? renderCompactRow(row0) : null}
-        {row1 ? renderCompactRow(row1) : null}
-        {row2 ? renderCompactRow(row2) : null}
+        {row0 ? renderInteractiveRow(row0) : null}
+        {row1 ? renderInteractiveRow(row1) : null}
+        {row2 ? renderInteractiveRow(row2) : null}
       </VStack>
     ),
   };

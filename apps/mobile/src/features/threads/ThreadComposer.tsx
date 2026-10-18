@@ -412,8 +412,6 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     () => composerStripAttachments(props.draftAttachments),
     [props.draftAttachments],
   );
-  // Stopping the agent is available whenever a turn is stoppable and not in queued-edit mode.
-  const canStopAgent = props.canStopThread && queuedEdit === null;
 
   const uploadStates = useAtomValue(composerAttachmentUploadsAtom);
   const attachmentsUploading =
@@ -529,6 +527,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const isVoiceInputPresented = voicePresentation.statusLabel !== null;
   // An open draft stays visible; only a collapsed composer becomes a voice strip.
   const isExpanded = isFocused || settingsSheetPresentation.keepsComposerExpanded;
+  // Stopping the agent is hidden while the message input field is active (focused, expanded, or containing draft input).
+  const isFieldActive = isFocused || isExpanded || hasContent;
+  const canStopAgent = props.canStopThread && queuedEdit === null && !isFieldActive;
   const showsCompactDictation = isVoiceInputPresented && !isExpanded;
   const isToolbarVisible = isExpanded || isVoiceInputPresented;
   const attachmentBlockReason = composerAttachmentUploadBlockReason({
