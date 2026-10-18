@@ -105,6 +105,7 @@ import { deviceEnvironment } from "../../state/device";
 import { useEnvironmentQuery } from "../../state/query";
 import { threadDevicePreviews } from "../devices/threadDevicePreviews";
 import { ThreadBrowserFloat } from "../browser/ThreadBrowserFloat";
+import { ThreadAudioFloatingControl } from "./ThreadAudioBar";
 import { useThreadServerBrowserTabs } from "../../state/preview";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { scopedThreadKey } from "../../lib/scopedEntities";
@@ -1208,6 +1209,17 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           loaded={browserTabs.loaded}
           top={navigationHeaderHeight + 8}
           onOpen={openBrowserPreview}
+        />
+      ) : null}
+
+      {showContent ? (
+        <ThreadAudioFloatingControl
+          key={`audio-${selectedThreadKey}`}
+          environmentId={props.environmentId}
+          threadId={props.selectedThread.id}
+          threadTitle={props.selectedThread.title}
+          projectTitle={project?.title ?? props.environmentLabel ?? "T3 Code"}
+          top={navigationHeaderHeight + 8}
         />
       ) : null}
 

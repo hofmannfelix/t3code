@@ -67,7 +67,7 @@ import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 
 import { AppText as Text } from "../../components/AppText";
 import { ComposerAttachmentButton } from "../../components/ComposerAttachmentButton";
-import { armReadAloudOnNextReply } from "./useReadAloud";
+import { armReadAloudOnNextReply, useThreadAudioMode } from "./useReadAloud";
 import {
   ComposerAttachmentStrip,
   ComposerAttachmentThumbnail,
@@ -265,51 +265,6 @@ const FOLLOW_UP_ACTION_SUBTITLE = {
   restart: "Start the turn over with this message",
 } as const;
 
-/**
- * The composer's primary button. While a turn is running it also long-presses
- * into the two follow-up behaviors, which is mobile's stand-in for the Command
- * modifier a hardware keyboard has.
- */
-function SendAndReadAloudActionButton(props: {
-  readonly disabled: boolean;
-  readonly presentation: ComposerSendPresentation;
-  readonly onSend: (followUp?: ActiveTurnComposerAction) => void;
-}) {
-  const { presentation } = props;
-  const button = (
-    <ComposerActionButton
-      accessibilityLabel="Senden und vorlesen"
-      icon="speaker.wave.2"
-      variant="primary"
-      disabled={props.disabled}
-      onPress={() => props.onSend()}
-    />
-  );
-  if (!presentation.offersFollowUpChoice || presentation.action === null || props.disabled) {
-    return button;
-  }
-  const actions = [presentation.action, presentation.alternate].filter(
-    (action): action is ActiveTurnComposerAction => action !== null,
-  );
-  return (
-    <ControlPillMenu
-      accessibilityLabel="Senden und vorlesen mit Auswahl"
-      shouldOpenOnLongPress
-      actions={actions.map((action) => ({
-        id: action,
-        title: `${FOLLOW_UP_ACTION_LABEL[action]} (und vorlesen)`,
-        subtitle: FOLLOW_UP_ACTION_SUBTITLE[action],
-        state: action === presentation.action ? ("on" as const) : ("off" as const),
-      }))}
-      onPressAction={({ nativeEvent }) =>
-        props.onSend(nativeEvent.event as ActiveTurnComposerAction)
-      }
-    >
-      {button}
-    </ControlPillMenu>
-  );
-}
-
 function SendActionButton(props: {
   readonly accessibilityLabel: string;
   readonly presentation: ComposerSendPresentation;
@@ -435,6 +390,14 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const settingsRoutePresentedRef = useRef(false);
   const wasExpandedBeforePreviewRef = useRef(false);
   const inFlightThreadIdsRef = useRef(new Set<string>());
+  const { isActive: isAudioModeActive } = useThreadAudioMode(
+    props.selectedThread ? String(props.selectedThread.id) : null,
+    {
+      environmentId: props.selectedThread?.environmentId,
+      threadTitle: props.selectedThread?.title,
+      projectTitle: project?.title ?? props.environmentLabel ?? "T3 Code",
+    },
+  );
   const { onExpandedChange } = props;
 
   const [previewFile, setPreviewFile] = useState<FilePreviewSource | null>(null);
@@ -658,6 +621,14 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       if (inFlightThreadIdsRef.current.has(threadKey)) return;
       inFlightThreadIdsRef.current.add(threadKey);
       try {
+        if (isAudioModeActive) {
+          armReadAloudOnNextReply({
+            threadId: String(props.selectedThread.id),
+            environmentId: props.selectedThread.environmentId,
+            threadTitle: props.selectedThread.title,
+            projectTitle: project?.title ?? props.environmentLabel ?? "T3 Code",
+          });
+        }
         const messageId = await onSendMessage(followUp);
         if (messageId === null) {
           return;
@@ -687,6 +658,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       props.selectedThread.id,
       props.selectedThread.title,
       voiceInput.blocksSubmission,
+      isAudioModeActive,
+      project?.title,
     ],
   );
 
@@ -695,46 +668,25 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   // through the regular send path. A cancelled or failed transcription
   // keeps the draft and sends nothing.
   const sendAfterDictationRef = useRef(false);
-  const handleSendAndReadAloud = useCallback(
-    async (followUp?: ActiveTurnComposerAction) => {
+  const stopDictationAndSend = useCallback(() => {
+    sendAfterDictationRef.current = true;
+    if (isAudioModeActive) {
       armReadAloudOnNextReply({
         threadId: String(props.selectedThread.id),
         environmentId: props.selectedThread.environmentId,
         threadTitle: props.selectedThread.title,
         projectTitle: project?.title ?? props.environmentLabel ?? "T3 Code",
       });
-      await handleSend(followUp);
-    },
-    [
-      handleSend,
-      project?.title,
-      props.environmentLabel,
-      props.selectedThread.environmentId,
-      props.selectedThread.id,
-      props.selectedThread.title,
-    ],
-  );
-
-  const stopDictationAndSend = useCallback(() => {
-    sendAfterDictationRef.current = true;
+    }
     voiceInput.stop();
-  }, [voiceInput]);
-
-  const stopDictationAndSendAndReadAloud = useCallback(() => {
-    armReadAloudOnNextReply({
-      threadId: String(props.selectedThread.id),
-      environmentId: props.selectedThread.environmentId,
-      threadTitle: props.selectedThread.title,
-      projectTitle: project?.title ?? props.environmentLabel ?? "T3 Code",
-    });
-    stopDictationAndSend();
   }, [
+    isAudioModeActive,
     project?.title,
     props.environmentLabel,
     props.selectedThread.environmentId,
     props.selectedThread.id,
     props.selectedThread.title,
-    stopDictationAndSend,
+    voiceInput,
   ]);
   useEffect(() => {
     if (!sendAfterDictationRef.current) return;
@@ -1165,11 +1117,6 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                     onPress={props.onStopThread}
                   />
                 ) : null}
-                <SendAndReadAloudActionButton
-                  disabled={!canSend}
-                  presentation={sendPresentation}
-                  onSend={handleSendAndReadAloud}
-                />
                 <SendActionButton
                   accessibilityLabel={sendBlockedReason ?? sendLabel}
                   presentation={sendPresentation}
@@ -1267,33 +1214,19 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   ) : null}
                   {voicePresentation.showsSend ? (
                     voiceInput.state.phase === "recording" ? (
-                      <View className="flex-row items-center gap-1">
-                        <SendAndReadAloudActionButton
-                          disabled={!props.canOperateThread}
-                          presentation={sendPresentation}
-                          onSend={stopDictationAndSendAndReadAloud}
-                        />
-                        <SendActionButton
-                          accessibilityLabel="Transcribe and send"
-                          presentation={sendPresentation}
-                          disabled={!props.canOperateThread}
-                          onSend={stopDictationAndSend}
-                        />
-                      </View>
+                      <SendActionButton
+                        accessibilityLabel="Transcribe and send"
+                        presentation={sendPresentation}
+                        disabled={!props.canOperateThread}
+                        onSend={stopDictationAndSend}
+                      />
                     ) : (
-                      <View className="flex-row items-center gap-1">
-                        <SendAndReadAloudActionButton
-                          disabled={!canSend}
-                          presentation={sendPresentation}
-                          onSend={handleSendAndReadAloud}
-                        />
-                        <SendActionButton
-                          accessibilityLabel={sendBlockedReason ?? sendLabel}
-                          presentation={sendPresentation}
-                          disabled={!canSend}
-                          onSend={handleSend}
-                        />
-                      </View>
+                      <SendActionButton
+                        accessibilityLabel={sendBlockedReason ?? sendLabel}
+                        presentation={sendPresentation}
+                        disabled={!canSend}
+                        onSend={handleSend}
+                      />
                     )
                   ) : null}
                 </View>

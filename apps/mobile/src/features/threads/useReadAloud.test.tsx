@@ -189,6 +189,8 @@ import {
   disarmReadAloudOnNextReply,
   getArmedReadAloudTargets,
   isReadAloudArmedOnNextReply,
+  useIsThreadReadAloudArmed,
+  useThreadAudioMode,
   SYNTHESIZE_TIMEOUT_MS,
   useReadAloud,
   useReadAloudAutoAnnounce,
@@ -808,5 +810,69 @@ describe("useReadAloudAutoAnnounce", () => {
     const afterDisarm = getArmedReadAloudTargets();
     expect(afterDisarm).not.toBe(afterArm);
     expect(getArmedReadAloudTargets()).toBe(afterDisarm);
+  });
+
+  it("useIsThreadReadAloudArmed reflects arming and disarming reactively", () => {
+    let armedStatus: boolean = false;
+    function TestComponent() {
+      armedStatus = useIsThreadReadAloudArmed("reactive-thread-1");
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+
+    act(() => {
+      root.render(<TestComponent />);
+    });
+    expect(armedStatus).toBe(false);
+
+    act(() => {
+      armReadAloudOnNextReply("reactive-thread-1");
+    });
+    expect(armedStatus).toBe(true);
+
+    act(() => {
+      disarmReadAloudOnNextReply("reactive-thread-1");
+    });
+    expect(armedStatus).toBe(false);
+  });
+
+  it("useThreadAudioMode toggles read aloud arming on and off", () => {
+    let modeHandle: ReturnType<typeof useThreadAudioMode> | null = null;
+    function ModeComponent() {
+      modeHandle = useThreadAudioMode("mode-thread-1", {
+        threadTitle: "Test Thread",
+        projectTitle: "T3 Code",
+      });
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    roots.push(root);
+
+    act(() => {
+      root.render(<ModeComponent />);
+    });
+    expect(modeHandle!.isActive).toBe(false);
+    expect(modeHandle!.isArmed).toBe(false);
+
+    // Toggle on (e.g. user taps top-right button after or before sending)
+    act(() => {
+      modeHandle!.toggleAudioMode(true);
+    });
+    expect(modeHandle!.isActive).toBe(true);
+    expect(modeHandle!.isArmed).toBe(true);
+    expect(isReadAloudArmedOnNextReply("mode-thread-1")).toBe(true);
+
+    // Toggle off (e.g. user taps close button or toggle button)
+    act(() => {
+      modeHandle!.toggleAudioMode(false);
+    });
+    expect(modeHandle!.isActive).toBe(false);
+    expect(modeHandle!.isArmed).toBe(false);
+    expect(isReadAloudArmedOnNextReply("mode-thread-1")).toBe(false);
   });
 });

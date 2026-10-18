@@ -234,6 +234,69 @@ export const useArmedReadAloudTargets = (): ReadonlyArray<ArmedReadAloudTarget> 
   );
 };
 
+export const useIsThreadReadAloudArmed = (threadId?: string | null): boolean => {
+  const armedTargets = useArmedReadAloudTargets();
+  if (!threadId) return false;
+  return armedTargets.some((target) => target.threadId === threadId);
+};
+
+export function useThreadAudioMode(
+  threadId?: string | null,
+  options?: {
+    readonly environmentId?: EnvironmentId | null;
+    readonly threadTitle?: string;
+    readonly projectTitle?: string;
+  },
+) {
+  const isArmed = useIsThreadReadAloudArmed(threadId);
+  const { speech, pause, resume, seekBy, stop } = useReadAloud(options?.environmentId ?? undefined);
+  const isCurrentThreadPlayback = Boolean(
+    threadId && speech.phase !== null && speech.threadId === threadId,
+  );
+  const isActive = isArmed || isCurrentThreadPlayback;
+
+  const toggleAudioMode = useCallback(
+    (desiredActive?: boolean) => {
+      if (!threadId) return;
+      const next = desiredActive ?? !isActive;
+      if (next) {
+        armReadAloudOnNextReply({
+          threadId,
+          environmentId: options?.environmentId ?? null,
+          threadTitle: options?.threadTitle,
+          projectTitle: options?.projectTitle,
+        });
+      } else {
+        disarmReadAloudOnNextReply(threadId);
+        if (isCurrentThreadPlayback) {
+          stop();
+        }
+      }
+    },
+    [
+      threadId,
+      isActive,
+      isCurrentThreadPlayback,
+      options?.environmentId,
+      options?.threadTitle,
+      options?.projectTitle,
+      stop,
+    ],
+  );
+
+  return {
+    isActive,
+    isArmed,
+    isCurrentThreadPlayback,
+    speech,
+    pause,
+    resume,
+    seekBy,
+    stop,
+    toggleAudioMode,
+  };
+}
+
 /** Stage logging for the device pipeline; visible in Metro during development. */
 const log = (...args: unknown[]) => {
   if (typeof __DEV__ !== "undefined" && __DEV__) console.log("[read-aloud]", ...args);
@@ -300,7 +363,7 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
       subtitle: audioStatus,
       activeCount: 1 + armedRows.length,
       updatedAt: nowIso,
-      audioPhase: speech.phase,
+      audioPhase: speech.phase === "paused" ? "idle" : speech.phase,
       audioThreadId: speech.threadId,
       audioThreadTitle: speech.title,
       audioProjectTitle: speech.projectTitle,
