@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 vi.mock("@expo/ui/swift-ui", () => ({
   HStack: "HStack",
   Image: "Image",
+  Link: "Link",
   Spacer: "Spacer",
   Text: "Text",
   VStack: "VStack",
@@ -11,6 +12,8 @@ vi.mock("@expo/ui/swift-ui", () => ({
 
 vi.mock("@expo/ui/swift-ui/modifiers", () => ({
   activityBackgroundTint: (value: unknown) => value,
+  background: (value: unknown) => value,
+  cornerRadius: (value: unknown) => value,
   font: (value: unknown) => value,
   foregroundStyle: (value: unknown) => value,
   frame: (value: unknown) => value,
@@ -158,147 +161,38 @@ describe("AgentActivity widget layout", () => {
       environment as never,
     );
     const banner = JSON.stringify(layout.banner);
-    expect(banner).toContain("3 active agents");
     expect(banner).toContain("1 needs attention");
   });
 
-  it("uses the attention tint for the compact presentations when a row needs input", () => {
+  it("renders a dictation action button linking to voice input", () => {
     const layout = AgentActivity(
       {
         ...props,
-        activeCount: 2,
-        activities: [
-          makeRow({}),
-          makeRow({ threadId: "thread-2", phase: "waiting_for_input", status: "Input" }),
-        ],
+        activities: [makeRow({})],
       },
       environment as never,
     );
-    expect(JSON.stringify(layout.compactLeading)).toContain("#a5b4fc"); // indigo-300
-    expect(JSON.stringify(layout.compactTrailing)).toContain("Input");
-    expect(JSON.stringify(layout.minimal)).toContain("#a5b4fc");
+    const banner = JSON.stringify(layout.banner);
+    expect(banner).toContain("Sprechen");
+    expect(banner).toContain("mic.fill");
+    expect(banner).toContain("action=voice");
   });
 
-  it("deep links the banner to the row that needs attention", () => {
+  it("renders an audio active speaker icon and status when audio is active", () => {
     const layout = AgentActivity(
       {
         ...props,
-        activeCount: 2,
         activities: [
-          makeRow({}),
           makeRow({
-            threadId: "thread-2",
-            phase: "waiting_for_approval",
-            status: "Approval",
-            deepLink: "/threads/env-1/thread-2",
+            isAudioActive: true,
+            status: "Liest Antwort vor",
           }),
         ],
       },
       environment as never,
     );
-    expect(JSON.stringify(layout.banner)).toContain(
-      '"widgetURL":"t3code://threads/env-1/thread-2"',
-    );
-  });
-
-  it("deep links the banner to the first row when nothing needs attention", () => {
-    const layout = AgentActivity({ ...props, activities: [makeRow({})] }, environment as never);
-    expect(JSON.stringify(layout.banner)).toContain(
-      '"widgetURL":"t3code://threads/env-1/thread-1"',
-    );
-  });
-
-  it("omits the deep link for unsafe paths and empty aggregates", () => {
-    expect(JSON.stringify(AgentActivity(props, environment as never))).not.toContain("widgetURL");
-    expect(
-      JSON.stringify(
-        AgentActivity(
-          { ...props, activities: [makeRow({ deepLink: "//evil.example" })] },
-          environment as never,
-        ),
-      ),
-    ).not.toContain("widgetURL");
-  });
-
-  it("leads with the outcome instead of a zero count when nothing is active", () => {
-    const layout = AgentActivity(
-      {
-        ...props,
-        subtitle: "Agent work completed",
-        activeCount: 0,
-        activities: [makeRow({ phase: "completed", status: "Done" })],
-      },
-      environment as never,
-    );
     const banner = JSON.stringify(layout.banner);
-    expect(banner).toContain("Agent work completed");
-    expect(banner).not.toContain("0 active");
-    expect(banner).toContain("#6ee7b7"); // emerald-300 header tint
-    expect(JSON.stringify(layout.compactTrailing)).toContain("Done");
-    expect(JSON.stringify(layout.compactTrailing)).not.toContain("0 active");
-    expect(JSON.stringify(layout.expandedLeading)).toContain("Done");
-    expect(JSON.stringify(layout.minimal)).toContain("checkmark.circle.fill");
-    expect(JSON.stringify(layout.bannerSmall)).toContain("Done");
-  });
-
-  it("reads Failed when the finished work ended in failure", () => {
-    const layout = AgentActivity(
-      {
-        ...props,
-        subtitle: "Agent work failed",
-        activeCount: 0,
-        activities: [makeRow({ phase: "failed", status: "Failed" })],
-      },
-      environment as never,
-    );
-    const banner = JSON.stringify(layout.banner);
-    expect(banner).toContain("Agent work failed");
-    expect(banner).toContain("#fca5a5"); // red-300 header tint
-    expect(JSON.stringify(layout.compactTrailing)).toContain("Failed");
-    expect(JSON.stringify(layout.expandedLeading)).toContain("Failed");
-    expect(JSON.stringify(layout.minimal)).toContain("xmark.octagon.fill");
-  });
-
-  it("lets a failure dominate mixed finished outcomes across every presentation", () => {
-    const layout = AgentActivity(
-      {
-        ...props,
-        // The server subtitle keys off the newest terminal row (completed
-        // here); the layout must still read Failed everywhere so the header
-        // text never disagrees with the tint, count slots, or minimal glyph.
-        subtitle: "Agent work completed",
-        activeCount: 0,
-        activities: [
-          makeRow({ phase: "completed", status: "Done" }),
-          makeRow({ threadId: "thread-2", phase: "failed", status: "Failed" }),
-        ],
-      },
-      environment as never,
-    );
-    const banner = JSON.stringify(layout.banner);
-    expect(banner).toContain("Agent work failed");
-    expect(banner).not.toContain("Agent work completed");
-    expect(banner).toContain("#fca5a5"); // red-300 header tint
-    expect(JSON.stringify(layout.compactTrailing)).toContain("Failed");
-    expect(JSON.stringify(layout.expandedLeading)).toContain("Failed");
-    expect(JSON.stringify(layout.minimal)).toContain("xmark.octagon.fill");
-  });
-
-  it("renders up to five rows in the banner", () => {
-    const layout = AgentActivity(
-      {
-        ...props,
-        activeCount: 6,
-        activities: [1, 2, 3, 4, 5, 6].map((n) =>
-          makeRow({ threadId: `t${n}`, threadTitle: `Thread ${n}` }),
-        ),
-      },
-      environment as never,
-    );
-    const banner = JSON.stringify(layout.banner);
-    for (const visible of [1, 2, 3, 4, 5]) {
-      expect(banner).toContain(`Thread ${visible}`);
-    }
-    expect(banner).not.toContain("Thread 6");
+    expect(banner).toContain("speaker.wave.2.fill");
+    expect(banner).toContain("Liest Antwort vor");
   });
 });

@@ -1,5 +1,6 @@
 import AVFoundation
 import ExpoModulesCore
+import MediaPlayer
 import Security
 import UIKit
 
@@ -13,11 +14,13 @@ final class T3SpeechSynthesizerDelegate: NSObject, AVSpeechSynthesizerDelegate {
   }
 
   func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+    MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     onFinish()
   }
 
   func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+    MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     onFinish()
   }
@@ -32,6 +35,8 @@ public final class T3NativeSpeechSynthesizer {
 
   public func speak(
     text: String,
+    title: String? = nil,
+    projectTitle: String? = nil,
     language: String? = nil,
     pitch: Float? = nil,
     rate: Float? = nil,
@@ -51,7 +56,7 @@ public final class T3NativeSpeechSynthesizer {
               let voice = AVSpeechSynthesisVoice(language: language) {
       utterance.voice = voice
     } else {
-      utterance.voice = AVSpeechSynthesisVoice(language: AVSpeechSynthesisVoice.currentLanguageCode())
+      utterance.voice = AVSpeechSynthesisVoice(language: "de-DE") ?? AVSpeechSynthesisVoice(language: AVSpeechSynthesisVoice.currentLanguageCode())
     }
 
     if let pitch = pitch {
@@ -71,11 +76,18 @@ public final class T3NativeSpeechSynthesizer {
 
     do {
       let audioSession = AVAudioSession.sharedInstance()
-      try audioSession.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+      // Use exclusive playback (.spokenAudio mode without duckOthers) so background media pauses
+      try audioSession.setCategory(.playback, mode: .spokenAudio, options: [])
       try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
     } catch {
       NSLog("[T3NativeSpeechSynthesizer] Audio session activation error: \(error)")
     }
+
+    var nowPlaying = [String: Any]()
+    nowPlaying[MPMediaItemPropertyTitle] = title ?? "Antwort"
+    let artistName = projectTitle != nil ? "T3 Code · \(projectTitle!)" : "T3 Code"
+    nowPlaying[MPMediaItemPropertyArtist] = artistName
+    MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlaying
 
     synthesizer.speak(utterance)
   }
@@ -84,6 +96,7 @@ public final class T3NativeSpeechSynthesizer {
     if synthesizer.isSpeaking {
       synthesizer.stopSpeaking(at: .immediate)
     }
+    MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     activeDelegate = nil
   }
@@ -147,9 +160,13 @@ public final class T3NativeControlsModule: Module {
       let pitch = (options?["pitch"] as? NSNumber)?.floatValue
       let rate = (options?["rate"] as? NSNumber)?.floatValue
       let voice = options?["voice"] as? String
+      let title = options?["title"] as? String
+      let projectTitle = options?["projectTitle"] as? String
 
       T3NativeSpeechSynthesizer.shared.speak(
         text: text,
+        title: title,
+        projectTitle: projectTitle,
         language: language,
         pitch: pitch,
         rate: rate,
@@ -176,6 +193,7 @@ public final class T3NativeControlsModule: Module {
 
     AsyncFunction("deactivateAudioSession") { (promise: Promise) in
       do {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         promise.resolve(true)
       } catch {
@@ -321,7 +339,7 @@ public final class T3NativeControlsModule: Module {
 
   @JS
   func getShowcaseScene() -> String? {
-    let scenePath = NSHomeDirectory() + "/Library/Caches/T3ShowcaseScene"
+    let scenePath = NSHomeDirectory() + "/Library/Caches/T3ShowcaseReadyScene"
     if let storedScene = try? String(contentsOfFile: scenePath, encoding: .utf8)
       .trimmingCharacters(in: .whitespacesAndNewlines), !storedScene.isEmpty {
       return storedScene

@@ -13,6 +13,7 @@ import {
   getAgentLiveActivities,
   startAgentLiveActivity,
 } from "../agent-awareness/agentLiveActivity";
+import type { AgentActivityProps, AgentActivityRowProps } from "../../widgets/AgentActivity";
 
 import { usePreparedConnection } from "../../state/session";
 import { serverEnvironment } from "../../state/server";
@@ -53,6 +54,7 @@ interface QueueEntry extends ReadItem {
 
 interface ThreadFeedMessageEntry {
   readonly type: "message";
+  readonly id?: string;
   readonly createdAt?: string;
   readonly message: {
     readonly id: string;
@@ -64,16 +66,25 @@ interface ThreadFeedMessageEntry {
   };
 }
 
-const IDLE: ReadAloudSpeech = {
-  key: null,
-  threadId: null,
-  environmentId: null,
-  title: null,
-  projectTitle: null,
-  phase: null,
-  source: null,
-  queued: 0,
-};
+const T3NativeControls =
+  Platform.OS === "ios"
+    ? (requireOptionalNativeModule("T3NativeControls") as {
+        speakText?: (
+          text: string,
+          options?: {
+            language?: string;
+            title?: string;
+            projectTitle?: string;
+            rate?: number;
+          },
+        ) => Promise<void>;
+        stopSpeaking?: () => Promise<void>;
+        pauseSpeaking?: () => Promise<void>;
+        resumeSpeaking?: () => Promise<void>;
+        isSpeaking?: () => boolean;
+        deactivateAudioSession?: () => Promise<boolean>;
+      } | null)
+    : null;
 
 const EMPTY_SETTINGS_ATOM = Atom.make<any>(null);
 
@@ -89,40 +100,19 @@ export const STREAM_START_TIMEOUT_MS = 20_000;
  */
 export const SYNTHESIZE_TIMEOUT_MS = 60_000;
 
-type Listener = () => void;
-
-const listeners = new Set<Listener>();
-
-let currentSpeech: ReadAloudSpeech = IDLE;
-let activeSpeechEnvironmentId: EnvironmentId | null = null;
-let readQueue: Array<QueueEntry> = [];
-let playlist: AudioPlaylist | null = null;
-let playlistSubscription: { remove: () => void } | null = null;
-let runCounter = 0;
-/** Off = the whole reply in one request; on = exponential sentence chunks. */
-let chunkedPlayback = true;
-let lastFailureAt = 0;
-let enqueueCounter = 0;
-let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
-/** Live device-stream session; stop() aborts it, consumers compare identity. */
-let activeStreamAbort: AbortController | null = null;
-/** Cached segment files created during device streaming. */
-const activeSegmentUris = new Set<string>();
-
 export interface ArmedReadAloudTarget {
   readonly threadId: string;
-  readonly environmentId: EnvironmentId | null;
+  readonly environmentId?: EnvironmentId | null;
   readonly threadTitle?: string;
   readonly projectTitle?: string;
-  readonly armedAt: number;
+  readonly armedAt?: number;
 }
 
 const armedTargets = new Map<string, ArmedReadAloudTarget>();
-const armedTargetListeners = new Set<() => void>();
 let cachedArmedTargets: ReadonlyArray<ArmedReadAloudTarget> = Object.freeze([]);
+const armedTargetListeners = new Set<() => void>();
 
 const notifyArmedTargetListeners = () => {
-  cachedArmedTargets = Object.freeze(Array.from(armedTargets.values()));
   for (const listener of armedTargetListeners) {
     listener();
   }
@@ -185,18 +175,32 @@ export const armReadAloudOnNextReply = (
   const threadTitle = typeof input === "string" ? undefined : input.threadTitle;
   const projectTitle = typeof input === "string" ? undefined : input.projectTitle;
 
-  armedTargets.set(threadId, {
+  const previous = armedTargets.get(threadId);
+  const nextTarget: ArmedReadAloudTarget = {
     threadId,
     environmentId,
-    threadTitle,
-    projectTitle,
+    threadTitle: threadTitle ?? previous?.threadTitle,
+    projectTitle: projectTitle ?? previous?.projectTitle,
     armedAt: Date.now(),
-  });
-  notifyArmedTargetListeners();
+  };
+
+  const isUnchanged =
+    previous !== undefined &&
+    previous.threadId === nextTarget.threadId &&
+    previous.environmentId === nextTarget.environmentId &&
+    previous.threadTitle === nextTarget.threadTitle &&
+    previous.projectTitle === nextTarget.projectTitle;
+
+  if (!isUnchanged) {
+    armedTargets.set(threadId, nextTarget);
+    cachedArmedTargets = Object.freeze(Array.from(armedTargets.values()));
+    notifyArmedTargetListeners();
+  }
 };
 
 export const disarmReadAloudOnNextReply = (threadId: string) => {
   if (armedTargets.delete(threadId)) {
+    cachedArmedTargets = Object.freeze(Array.from(armedTargets.values()));
     notifyArmedTargetListeners();
   }
 };
@@ -241,6 +245,8 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
   if (Platform.OS !== "ios") return;
   try {
     const activities = getAgentLiveActivities();
+    const armedTargets = getArmedReadAloudTargets();
+
     if (!speech.phase) {
       if (activeAudioLiveActivity) {
         try {
@@ -259,30 +265,54 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
     }
 
     const nowIso = new Date().toISOString();
-    const props = {
-      title: speech.title || "T3 Code",
-      subtitle: speech.phase === "loading" ? "Audio wird vorbereitet..." : "Audio-Wiedergabe",
-      activeCount: 1,
+    const audioStatus = speech.phase === "loading" ? "Lade Audio..." : "Liest Antwort vor";
+
+    const audioRow: AgentActivityRowProps = {
+      environmentId: speech.environmentId ? String(speech.environmentId) : "",
+      threadId: speech.threadId ?? "",
+      projectTitle: speech.projectTitle || "T3 Code",
+      threadTitle: speech.title || "Sprachausgabe",
+      modelTitle: "",
+      phase: "running",
+      status: audioStatus,
       updatedAt: nowIso,
-      activities: [
-        {
-          environmentId: speech.environmentId ? String(speech.environmentId) : "",
-          threadId: speech.threadId ?? "",
-          projectTitle: speech.projectTitle || "T3 Code",
-          threadTitle: speech.title || "Sprachausgabe",
-          modelTitle: "",
-          phase: "running" as const,
-          status: speech.phase === "loading" ? "Lade Audio..." : "Liest Antwort vor",
-          updatedAt: nowIso,
-          deepLink: speech.threadId ? `/threads/${speech.threadId}` : "/",
-        },
-      ],
+      deepLink: speech.threadId ? `/threads/${speech.threadId}` : "/",
+      isAudioActive: true,
+    };
+
+    const armedRows: AgentActivityRowProps[] = armedTargets
+      .filter((t) => t.threadId !== speech.threadId)
+      .map((t) => ({
+        environmentId: t.environmentId ? String(t.environmentId) : "",
+        threadId: t.threadId,
+        projectTitle: t.projectTitle || "T3 Code",
+        threadTitle: t.threadTitle || "Thread",
+        modelTitle: "",
+        phase: "running",
+        status: "Antwort abwarten",
+        updatedAt: nowIso,
+        deepLink: `/threads/${t.threadId}`,
+        isAudioArmed: true,
+      }));
+
+    const props: AgentActivityProps = {
+      title: speech.title || "T3 Code",
+      subtitle: audioStatus,
+      activeCount: 1 + armedRows.length,
+      updatedAt: nowIso,
+      audioPhase: speech.phase,
+      audioThreadId: speech.threadId,
+      audioThreadTitle: speech.title,
+      audioProjectTitle: speech.projectTitle,
+      activities: [audioRow, ...armedRows],
     };
 
     if (activeAudioLiveActivity) {
       void activeAudioLiveActivity.update(props);
     } else if (activities.length > 0) {
       for (const act of activities) {
+        (act as unknown as { __t3_audio?: boolean }).__t3_audio = true;
+        activeAudioLiveActivity = act;
         void act.update(props);
       }
     } else {
@@ -299,13 +329,8 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
 
 export const deactivateAudioSession = async () => {
   try {
-    if (Platform.OS === "ios") {
-      const nativeControls = requireOptionalNativeModule<{
-        deactivateAudioSession?: () => Promise<boolean>;
-      }>("T3NativeControls");
-      if (nativeControls?.deactivateAudioSession) {
-        await nativeControls.deactivateAudioSession();
-      }
+    if (T3NativeControls?.deactivateAudioSession) {
+      await T3NativeControls.deactivateAudioSession();
     }
   } catch {}
   try {
@@ -353,6 +378,11 @@ const stopCurrent = () => {
   activeStreamAbort?.abort();
   activeStreamAbort = null;
   readQueue = [];
+  if (T3NativeControls?.stopSpeaking) {
+    try {
+      void T3NativeControls.stopSpeaking();
+    } catch {}
+  }
   releasePlaylist();
   cleanupActiveSegments();
   setSpeech(IDLE);
@@ -391,13 +421,13 @@ const announceExhausted = (message: string) => {
 };
 
 /**
- * Ensures iOS audio session is active and configured for playback.
+ * Ensures iOS audio session is active and configured for playback without ducking.
  */
 const ensureAudioSession = async () => {
   try {
     await setAudioModeAsync({
       allowsRecording: false,
-      interruptionMode: "duckOthers",
+      interruptionMode: "doNotMix",
       playsInSilentMode: true,
       shouldPlayInBackground: true,
     });
@@ -423,6 +453,37 @@ const chunkReply = (text: string): string[] => {
   if (index < sentences.length) chunks.push(sentences.slice(index).join(" "));
   return chunks.filter((chunk) => chunk.trim().length > 0);
 };
+
+const IDLE: ReadAloudSpeech = {
+  key: null,
+  threadId: null,
+  environmentId: null,
+  title: null,
+  projectTitle: null,
+  phase: null,
+  source: null,
+  queued: 0,
+};
+
+type Listener = () => void;
+
+let currentSpeech: ReadAloudSpeech = IDLE;
+const listeners = new Set<Listener>();
+
+let activeSpeechEnvironmentId: EnvironmentId | null = null;
+let readQueue: QueueEntry[] = [];
+let enqueueCounter = 0;
+let lastFailureAt = 0;
+let runCounter = 0;
+
+let playlist: AudioPlaylist | null = null;
+let playlistSubscription: { remove: () => void } | null = null;
+let activeStreamAbort: AbortController | null = null;
+const activeSegmentUris = new Set<string>();
+
+let chunkedPlayback = true;
+
+let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
 
 /**
  * Read-aloud for the phone:
@@ -479,6 +540,47 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
   const httpBaseUrl =
     preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : null;
 
+  const speakWithNativeFallback = useCallback(
+    async (itemToSpeak: ReadItem, isCurrent: () => boolean) => {
+      if (Platform.OS === "ios" && T3NativeControls?.speakText) {
+        try {
+          await ensureAudioSession();
+          if (!isCurrent()) return true;
+          setSpeech({
+            key: itemToSpeak.key,
+            threadId: itemToSpeak.threadId ?? currentSpeech.threadId,
+            environmentId: itemToSpeak.environmentId ?? currentSpeech.environmentId,
+            title: itemToSpeak.title ?? currentSpeech.title,
+            projectTitle: itemToSpeak.projectTitle ?? currentSpeech.projectTitle,
+            phase: "playing",
+            source: itemToSpeak.source,
+            queued: readQueue.length,
+          });
+          log(
+            "speakWithNativeFallback: speaking via iOS AVSpeechSynthesizer",
+            `${itemToSpeak.text.length} chars`,
+          );
+          await T3NativeControls.speakText(itemToSpeak.text, {
+            language: "de-DE",
+            title: itemToSpeak.title ?? "Antwort",
+            projectTitle: itemToSpeak.projectTitle ?? "T3 Code",
+          });
+          if (!isCurrent()) return true;
+          if (itemToSpeak.source === "auto" || readQueue.length > 0) {
+            playNextFromQueue();
+          } else {
+            setSpeech(IDLE);
+          }
+          return true;
+        } catch (e) {
+          log("speakWithNativeFallback failed", e);
+        }
+      }
+      return false;
+    },
+    [],
+  );
+
   /**
    * Streams the reply from Gemini in ONE SSE connection and feeds segment
    * files directly into the native AVQueuePlayer playlist for seamless 0ms playback.
@@ -486,6 +588,8 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
   const consumeDeviceStream = useCallback(
     (item: ReadItem) => {
       if (!deviceTtsConfig) return;
+      const run = runCounter;
+      const isCurrent = () => run === runCounter;
       const abort = new AbortController();
       activeStreamAbort = abort;
       log(
@@ -506,7 +610,12 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         const startWatchdog = setTimeout(() => {
           if (!firstSegmentSeen && activeStreamAbort === abort) {
             abort.abort();
-            announceExhausted("Gemini's audio stream did not start within 20 seconds. Try again.");
+            void (async () => {
+              if (await speakWithNativeFallback(item, isCurrent)) return;
+              announceExhausted(
+                "Gemini's audio stream did not start within 20 seconds. Try again.",
+              );
+            })();
           }
         }, STREAM_START_TIMEOUT_MS);
 
@@ -531,6 +640,12 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
                 sources: [{ uri: segmentUri }],
               });
               playlist = pl;
+              try {
+                pl.setActiveForLockScreen(true, {
+                  title: item.title ?? "Antwort",
+                  artist: item.projectTitle ? `T3 Code · ${item.projectTitle}` : "T3 Code",
+                });
+              } catch {}
 
               pl.addListener("trackChanged", ({ previousIndex, currentIndex }) => {
                 log("playlist trackChanged:", previousIndex, "->", currentIndex);
@@ -612,6 +727,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
           clearTimeout(startWatchdog);
           log("stream consumer: failed", error);
           if (activeStreamAbort !== abort) return;
+          if (await speakWithNativeFallback(item, isCurrent)) return;
           announceExhausted(
             error instanceof Error && error.message.length > 0
               ? error.message
@@ -620,7 +736,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         }
       })();
     },
-    [deviceTtsConfig],
+    [deviceTtsConfig, speakWithNativeFallback],
   );
 
   const speak = useCallback(
@@ -723,6 +839,18 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
   );
 
   const pause = useCallback(() => {
+    if (T3NativeControls?.pauseSpeaking && currentSpeech.phase === "playing") {
+      try {
+        void T3NativeControls.pauseSpeaking();
+      } catch (e) {
+        log("native pause: failed", e);
+      }
+      setSpeech({
+        ...currentSpeech,
+        phase: "paused",
+      });
+      return;
+    }
     if (playlist && (currentSpeech.phase === "playing" || currentSpeech.phase === "loading")) {
       try {
         playlist.pause();
@@ -737,6 +865,18 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
   }, []);
 
   const resume = useCallback(() => {
+    if (T3NativeControls?.resumeSpeaking && currentSpeech.phase === "paused") {
+      try {
+        void T3NativeControls.resumeSpeaking();
+      } catch (e) {
+        log("native resume: failed", e);
+      }
+      setSpeech({
+        ...currentSpeech,
+        phase: "playing",
+      });
+      return;
+    }
     if (playlist && currentSpeech.phase === "paused") {
       try {
         playlist.play();
@@ -838,7 +978,10 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
       });
 
       if (httpBaseUrl === null && !deviceTtsConfig) {
-        announceExhausted("This environment is not connected right now.");
+        void (async () => {
+          if (await speakWithNativeFallback(item, isCurrent)) return;
+          announceExhausted("This environment is not connected right now.");
+        })();
         return;
       }
 
@@ -873,6 +1016,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
             ]);
             if (!isCurrent()) return;
             if (result._tag !== "Success") {
+              if (await speakWithNativeFallback(item, isCurrent)) return;
               announceExhausted(
                 "The server could not synthesize this reply. Check the read-aloud settings on your Mac.",
               );
@@ -881,6 +1025,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
             clipUri =
               httpBaseUrl === null ? null : resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
             if (clipUri === null) {
+              if (await speakWithNativeFallback(item, isCurrent)) return;
               announceExhausted("The reply clip could not be loaded. Reconnect and try again.");
               return;
             }
@@ -907,12 +1052,22 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
             clipUri,
           );
           playlist = clipPlaylist;
+          try {
+            clipPlaylist.setActiveForLockScreen(true, {
+              title: item.title ?? "Antwort",
+              artist: item.projectTitle ? `T3 Code · ${item.projectTitle}` : "T3 Code",
+            });
+          } catch {}
+
           let started = false;
 
           const startWatchdog = setTimeout(() => {
             if (started || !isCurrent()) return;
             releasePlaylist();
-            announceExhausted("The reply clip did not start playing.");
+            void (async () => {
+              if (await speakWithNativeFallback(item, isCurrent)) return;
+              announceExhausted("The reply clip did not start playing.");
+            })();
           }, START_WATCHDOG_MS);
 
           playlistSubscription = clipPlaylist.addListener("playlistStatusUpdate", (status) => {
@@ -965,6 +1120,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         } catch (error) {
           if (!isCurrent()) return;
           log("playlist: failed", error);
+          if (await speakWithNativeFallback(item, isCurrent)) return;
           announceExhausted(
             error instanceof Error && error.message.length > 0
               ? error.message
@@ -974,7 +1130,14 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
       };
       void startPlayback();
     };
-  }, [consumeDeviceStream, deviceTtsConfig, environmentId, httpBaseUrl, ttsSynthesize]);
+  }, [
+    consumeDeviceStream,
+    deviceTtsConfig,
+    environmentId,
+    httpBaseUrl,
+    speakWithNativeFallback,
+    ttsSynthesize,
+  ]);
 
   return { speech, speak, pause, resume, seekBy, stop, enqueue };
 }

@@ -1,7 +1,9 @@
-import { HStack, Image, Spacer, Text, VStack, ZStack } from "@expo/ui/swift-ui";
+import { HStack, Image, Link, Spacer, Text, VStack, ZStack } from "@expo/ui/swift-ui";
 import type { ComponentProps } from "react";
 import {
   activityBackgroundTint,
+  background,
+  cornerRadius,
   font,
   foregroundStyle,
   frame,
@@ -38,6 +40,8 @@ export interface AgentActivityRowProps {
   readonly status: string;
   readonly updatedAt: string;
   readonly deepLink: string;
+  readonly isAudioActive?: boolean;
+  readonly isAudioArmed?: boolean;
 }
 
 export interface AgentActivityProps {
@@ -46,6 +50,10 @@ export interface AgentActivityProps {
   readonly activeCount: number;
   readonly updatedAt: string;
   readonly activities: ReadonlyArray<AgentActivityRowProps>;
+  readonly audioPhase?: "idle" | "loading" | "playing" | null;
+  readonly audioThreadId?: string | null;
+  readonly audioThreadTitle?: string | null;
+  readonly audioProjectTitle?: string | null;
 }
 
 // This function is serialized into the widget extension's JS bundle, so it
@@ -115,12 +123,22 @@ export function AgentActivity(
           : { ...row, phase: "stale", status: "Out of date" },
       )
     : props.activities;
-  const ordered = [...activities].sort((a, b) => phasePriority(a.phase) - phasePriority(b.phase));
+  const ordered = [...activities].sort((a, b) => {
+    // Audio-active rows always take precedence right after attention
+    if (a.isAudioActive && !b.isAudioActive) return -1;
+    if (!a.isAudioActive && b.isAudioActive) return 1;
+    return phasePriority(a.phase) - phasePriority(b.phase);
+  });
   const row0 = ordered[0];
   const row1 = ordered[1];
   const row2 = ordered[2];
   const row3 = ordered[3];
   const row4 = ordered[4];
+
+  const hasAudioActive =
+    props.audioPhase === "playing" ||
+    props.audioPhase === "loading" ||
+    activities.some((r) => r.isAudioActive);
 
   const attentionRows = activities.filter(
     (row) => row.phase === "waiting_for_approval" || row.phase === "waiting_for_input",
@@ -143,7 +161,7 @@ export function AgentActivity(
   // terminal row): every presentation — header text, tint, count slots,
   // minimal glyph — must agree, and a failure anywhere should dominate a
   // newer success.
-  const allDone = props.activeCount === 0;
+  const allDone = props.activeCount === 0 && !hasAudioActive;
   const doneLabel = failedRow ? "Failed" : "Done";
   const outcomeLabel = failedRow ? "Agent work failed" : "Agent work completed";
 
@@ -155,7 +173,9 @@ export function AgentActivity(
     ? outcomeLabel
     : environment.isStale
       ? "Agent status out of date"
-      : `${props.activeCount} active ${agentWord}`;
+      : hasAudioActive && props.activeCount <= 1
+        ? props.subtitle || "Sprachausgabe"
+        : `${props.activeCount} active ${agentWord}`;
   const attentionSuffix =
     attentionRows.length > 0
       ? `${attentionRows.length} need${attentionRows.length === 1 ? "s" : ""} attention`
@@ -174,6 +194,11 @@ export function AgentActivity(
     deepLinkRow && deepLinkRow.deepLink.startsWith("/") && !deepLinkRow.deepLink.startsWith("//")
       ? `t3code://${deepLinkRow.deepLink.slice(1)}`
       : null;
+
+  const voiceLink =
+    deepLinkRow && deepLinkRow.deepLink.startsWith("/") && !deepLinkRow.deepLink.startsWith("//")
+      ? `t3code://${deepLinkRow.deepLink.slice(1)}?action=voice`
+      : "t3code://voice-input";
 
   // A scannable status glyph per phase — reads faster than colored words and
   // ties the compact / expanded / banner / watch presentations together.
@@ -222,25 +247,61 @@ export function AgentActivity(
       >
         {row.threadTitle}
       </Text>
-      {/* No layoutPriority and no frame on the project: two bare texts take
-          their ideal width when it fits and shrink proportionally only when it
-          doesn't — so short rows never truncate, and long title + long project
-          truncate together. (A maxWidth frame is greedy and reserved its full
-          width even for short names; layoutPriority let the project starve the
-          title.) */}
       <Text modifiers={[font({ size: 11 }), foregroundStyle(secondaryForeground), lineLimit(1)]}>
         {row.projectTitle}
       </Text>
       <Spacer minLength={8} />
-      <Text
-        modifiers={[
-          font({ weight: "semibold", size: 11 }),
-          foregroundStyle(phaseTint(row.phase)),
-          layoutPriority(1),
-        ]}
-      >
-        {row.status}
-      </Text>
+      {row.isAudioActive ? (
+        <HStack spacing={4} alignment="center">
+          <Image
+            systemName="speaker.wave.2.fill"
+            modifiers={[
+              frame({ width: 12, height: 12 }),
+              resizable(),
+              foregroundStyle(isLightScheme ? "#059669" : "#34d399"),
+            ]}
+          />
+          <Text
+            modifiers={[
+              font({ weight: "semibold", size: 11 }),
+              foregroundStyle(isLightScheme ? "#059669" : "#34d399"),
+              layoutPriority(1),
+            ]}
+          >
+            {row.status}
+          </Text>
+        </HStack>
+      ) : row.isAudioArmed ? (
+        <HStack spacing={4} alignment="center">
+          <Image
+            systemName="speaker.fill"
+            modifiers={[
+              frame({ width: 11, height: 11 }),
+              resizable(),
+              foregroundStyle(secondaryForeground),
+            ]}
+          />
+          <Text
+            modifiers={[
+              font({ weight: "semibold", size: 11 }),
+              foregroundStyle(phaseTint(row.phase)),
+              layoutPriority(1),
+            ]}
+          >
+            {row.status}
+          </Text>
+        </HStack>
+      ) : (
+        <Text
+          modifiers={[
+            font({ weight: "semibold", size: 11 }),
+            foregroundStyle(phaseTint(row.phase)),
+            layoutPriority(1),
+          ]}
+        >
+          {row.status}
+        </Text>
+      )}
     </HStack>
   );
 
@@ -268,9 +329,7 @@ export function AgentActivity(
           ...(deepLink ? [widgetURL(deepLink)] : []),
         ]}
       >
-        {/* Logo pinned to the leading edge; the status texts centered across the
-            full width (ZStack so the logo doesn't skew the centering). No footer —
-            overflow beyond the visible rows is inferable from the count. */}
+        {/* Logo pinned to leading edge, headline centered, action button on trailing edge */}
         <ZStack>
           <HStack spacing={0} alignment="center">
             {renderLogo(13, primaryForeground)}
@@ -281,8 +340,6 @@ export function AgentActivity(
             <Text
               modifiers={[
                 font({ weight: "semibold", size: 13 }),
-                // The all-done header carries the outcome tint (emerald /
-                // red) the way the Done/Failed status labels do.
                 foregroundStyle(allDone ? headerTint : primaryForeground),
                 lineLimit(1),
               ]}
@@ -304,6 +361,34 @@ export function AgentActivity(
               </Text>
             ) : null}
             <Spacer minLength={0} />
+          </HStack>
+          <HStack spacing={0} alignment="center">
+            <Spacer minLength={0} />
+            <Link destination={voiceLink}>
+              <HStack
+                spacing={4}
+                alignment="center"
+                modifiers={[
+                  padding({ vertical: 3, horizontal: 8 }),
+                  background(isLightScheme ? "#2563eb" : "#3b82f6"),
+                  cornerRadius(10),
+                ]}
+              >
+                <Image
+                  systemName="mic.fill"
+                  modifiers={[
+                    frame({ width: 10, height: 10 }),
+                    resizable(),
+                    foregroundStyle("#ffffff"),
+                  ]}
+                />
+                <Text
+                  modifiers={[font({ weight: "semibold", size: 11 }), foregroundStyle("#ffffff")]}
+                >
+                  Sprechen
+                </Text>
+              </HStack>
+            </Link>
           </HStack>
         </ZStack>
         {row0 ? renderCompactRow(row0) : null}
@@ -349,44 +434,73 @@ export function AgentActivity(
         ) : null}
       </VStack>
     ),
-    compactLeading: renderLogo(14, tint),
+    compactLeading: (
+      <HStack spacing={3} alignment="center">
+        {renderLogo(14, tint)}
+        {hasAudioActive ? (
+          <Image
+            systemName="speaker.wave.2.fill"
+            modifiers={[
+              frame({ width: 11, height: 11 }),
+              resizable(),
+              foregroundStyle(isLightScheme ? "#059669" : "#34d399"),
+            ]}
+          />
+        ) : null}
+      </HStack>
+    ),
     compactTrailing: (
-      <Text modifiers={[font({ weight: "semibold", size: 11 }), foregroundStyle(tint)]}>
-        {attentionRow
-          ? attentionRow.phase === "waiting_for_approval"
-            ? "Approval"
-            : "Input"
-          : activeLabel}
-      </Text>
+      <HStack spacing={3} alignment="center">
+        <Text modifiers={[font({ weight: "semibold", size: 11 }), foregroundStyle(tint)]}>
+          {hasAudioActive && props.activeCount <= 1
+            ? "Audio"
+            : attentionRow
+              ? attentionRow.phase === "waiting_for_approval"
+                ? "Approval"
+                : "Input"
+              : activeLabel}
+        </Text>
+      </HStack>
     ),
     // The shared/minimal form is a ~22pt circle — a single signal reads there,
     // the wordmark does not. Show the blocking/outcome phase glyph, else the
     // mark (all-done shows the hero row's checkmark/cross).
-    minimal:
-      (attentionRow || failedRow || allDone) && heroRow
+    minimal: hasAudioActive
+      ? renderGlyph("speaker.wave.2.fill", 13, isLightScheme ? "#059669" : "#34d399")
+      : (attentionRow || failedRow || allDone) && heroRow
         ? renderGlyph(phaseSymbol(heroRow.phase), 13, phaseTint(heroRow.phase))
         : renderLogo(11, tint),
     expandedLeading: (
       <HStack spacing={5} alignment="center" modifiers={[padding({ leading: 4, vertical: 4 })]}>
         {renderLogo(15, tint)}
         <Text modifiers={[font({ weight: "bold", size: 13 }), foregroundStyle(tint)]}>
-          {allDone ? doneLabel : `${props.activeCount}`}
+          {hasAudioActive ? "Audio" : allDone ? doneLabel : `${props.activeCount}`}
         </Text>
       </HStack>
     ),
-    // No center content: the phase glyphs + statuses in expandedBottom already
-    // carry the attention signal, and the expanded island's height budget is
-    // tight enough that a summary line there pushed the third row off.
     expandedCenter: null,
-    // No trailing content: a timestamp is glanceable-lock-screen info, not
-    // useful in a view the user is actively holding open — and the trailing
-    // region hugs the island's corner radius, which clipped it anyway.
-    expandedTrailing: null,
+    expandedTrailing: (
+      <Link destination={voiceLink}>
+        <HStack
+          spacing={4}
+          alignment="center"
+          modifiers={[
+            padding({ vertical: 3, horizontal: 7 }),
+            background(isLightScheme ? "#2563eb" : "#3b82f6"),
+            cornerRadius(10),
+          ]}
+        >
+          <Image
+            systemName="mic.fill"
+            modifiers={[frame({ width: 10, height: 10 }), resizable(), foregroundStyle("#ffffff")]}
+          />
+          <Text modifiers={[font({ weight: "semibold", size: 11 }), foregroundStyle("#ffffff")]}>
+            Sprechen
+          </Text>
+        </HStack>
+      </Link>
+    ),
     expandedBottom: (
-      // Vertical padding only: the expanded region provides its own horizontal
-      // content margins, so `all` padding double-indented the rows.
-      // Horizontal padding keeps both edges clear of the island's corner
-      // curvature (right edge clipped status labels; titles hugged the left).
       <VStack
         alignment="leading"
         spacing={5}
