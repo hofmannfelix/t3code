@@ -7,7 +7,12 @@ import {
   type AudioPlaylist,
 } from "expo-audio";
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
-import { Alert } from "react-native";
+import { Alert, Platform } from "react-native";
+import { requireOptionalNativeModule } from "expo";
+import {
+  getAgentLiveActivities,
+  startAgentLiveActivity,
+} from "../agent-awareness/agentLiveActivity";
 
 import { usePreparedConnection } from "../../state/session";
 import { serverEnvironment } from "../../state/server";
@@ -101,19 +106,66 @@ let activeStreamAbort: AbortController | null = null;
 /** Cached segment files created during device streaming. */
 const activeSegmentUris = new Set<string>();
 
-/** Tracks thread IDs that have an armed "Send and read aloud" request for the next reply. */
-const pendingReadAloudThreads = new Set<string>();
+export interface ArmedReadAloudTarget {
+  readonly threadId: string;
+  readonly environmentId: EnvironmentId | null;
+  readonly threadTitle?: string;
+  readonly armedAt: number;
+}
 
-export const armReadAloudOnNextReply = (threadId: string) => {
-  pendingReadAloudThreads.add(threadId);
+const armedTargets = new Map<string, ArmedReadAloudTarget>();
+const armedTargetListeners = new Set<() => void>();
+
+const notifyArmedTargetListeners = () => {
+  for (const listener of armedTargetListeners) {
+    listener();
+  }
+};
+
+export const armReadAloudOnNextReply = (
+  input: string | { threadId: string; environmentId?: EnvironmentId | null; threadTitle?: string },
+) => {
+  const threadId = typeof input === "string" ? input : input.threadId;
+  const environmentId =
+    typeof input === "string"
+      ? (activeSpeechEnvironmentId ?? null)
+      : (input.environmentId ?? activeSpeechEnvironmentId ?? null);
+  const threadTitle = typeof input === "string" ? undefined : input.threadTitle;
+
+  armedTargets.set(threadId, {
+    threadId,
+    environmentId,
+    threadTitle,
+    armedAt: Date.now(),
+  });
+  notifyArmedTargetListeners();
 };
 
 export const disarmReadAloudOnNextReply = (threadId: string) => {
-  pendingReadAloudThreads.delete(threadId);
+  if (armedTargets.delete(threadId)) {
+    notifyArmedTargetListeners();
+  }
 };
 
 export const isReadAloudArmedOnNextReply = (threadId: string) => {
-  return pendingReadAloudThreads.has(threadId);
+  return armedTargets.has(threadId);
+};
+
+export const getArmedReadAloudTargets = (): ReadonlyArray<ArmedReadAloudTarget> => {
+  return Array.from(armedTargets.values());
+};
+
+export const useArmedReadAloudTargets = (): ReadonlyArray<ArmedReadAloudTarget> => {
+  return useSyncExternalStore(
+    (onStoreChange) => {
+      armedTargetListeners.add(onStoreChange);
+      return () => {
+        armedTargetListeners.delete(onStoreChange);
+      };
+    },
+    getArmedReadAloudTargets,
+    getArmedReadAloudTargets,
+  );
 };
 
 /** Stage logging for the device pipeline; visible in Metro during development. */
@@ -121,9 +173,91 @@ const log = (...args: unknown[]) => {
   if (typeof __DEV__ !== "undefined" && __DEV__) console.log("[read-aloud]", ...args);
 };
 
+let activeAudioLiveActivity: ReturnType<typeof startAgentLiveActivity> = null;
+
+export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
+  if (Platform.OS !== "ios") return;
+  try {
+    const activities = getAgentLiveActivities();
+    if (!speech.phase) {
+      if (activeAudioLiveActivity) {
+        try {
+          void activeAudioLiveActivity.end("immediate");
+        } catch {}
+        activeAudioLiveActivity = null;
+      }
+      for (const act of activities) {
+        if ((act as unknown as { readonly __t3_audio?: boolean }).__t3_audio) {
+          try {
+            void act.end("immediate");
+          } catch {}
+        }
+      }
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const props = {
+      title: speech.title || "T3 Code",
+      subtitle: speech.phase === "loading" ? "Audio wird vorbereitet..." : "Audio-Wiedergabe",
+      activeCount: 1,
+      updatedAt: nowIso,
+      activities: [
+        {
+          environmentId: speech.environmentId ? String(speech.environmentId) : "",
+          threadId: speech.threadId ?? "",
+          projectTitle: "T3 Code",
+          threadTitle: speech.title || "Sprachausgabe",
+          modelTitle: "",
+          phase: "running" as const,
+          status: speech.phase === "loading" ? "Lade Audio..." : "Liest Antwort vor",
+          updatedAt: nowIso,
+          deepLink: speech.threadId ? `/threads/${speech.threadId}` : "/",
+        },
+      ],
+    };
+
+    if (activeAudioLiveActivity) {
+      void activeAudioLiveActivity.update(props);
+    } else if (activities.length > 0) {
+      for (const act of activities) {
+        void act.update(props);
+      }
+    } else {
+      const act = startAgentLiveActivity(props);
+      if (act) {
+        (act as unknown as { __t3_audio?: boolean }).__t3_audio = true;
+        activeAudioLiveActivity = act;
+      }
+    }
+  } catch {
+    // Live Activity is best-effort
+  }
+};
+
+export const deactivateAudioSession = async () => {
+  try {
+    if (Platform.OS === "ios") {
+      const nativeControls = requireOptionalNativeModule<{
+        deactivateAudioSession?: () => Promise<boolean>;
+      }>("T3NativeControls");
+      if (nativeControls?.deactivateAudioSession) {
+        await nativeControls.deactivateAudioSession();
+      }
+    }
+  } catch {}
+  try {
+    await setIsAudioActiveAsync(false);
+  } catch {}
+};
+
 const setSpeech = (next: ReadAloudSpeech) => {
   currentSpeech = next;
   for (const listener of listeners) listener();
+  syncAudioLiveActivity(next);
+  if (next.phase === null) {
+    void deactivateAudioSession();
+  }
 };
 
 /** Set when a reply starts being spoken; used for stage timing in the logs. */
@@ -202,7 +336,7 @@ const ensureAudioSession = async () => {
       allowsRecording: false,
       interruptionMode: "duckOthers",
       playsInSilentMode: true,
-      shouldPlayInBackground: false,
+      shouldPlayInBackground: true,
     });
     await setIsAudioActiveAsync(true);
   } catch {

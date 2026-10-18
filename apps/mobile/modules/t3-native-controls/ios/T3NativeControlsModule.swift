@@ -13,10 +13,12 @@ final class T3SpeechSynthesizerDelegate: NSObject, AVSpeechSynthesizerDelegate {
   }
 
   func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+    try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     onFinish()
   }
 
   func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+    try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     onFinish()
   }
 }
@@ -82,6 +84,7 @@ public final class T3NativeSpeechSynthesizer {
     if synthesizer.isSpeaking {
       synthesizer.stopSpeaking(at: .immediate)
     }
+    try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     activeDelegate = nil
   }
 
@@ -170,6 +173,15 @@ public final class T3NativeControlsModule: Module {
       T3NativeSpeechSynthesizer.shared.resume()
       promise.resolve(nil)
     }.runOnQueue(.main)
+
+    AsyncFunction("deactivateAudioSession") { (promise: Promise) in
+      do {
+        try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        promise.resolve(true)
+      } catch {
+        promise.resolve(false)
+      }
+    }
 
     Function("isSpeaking") { () -> Bool in
       return T3NativeSpeechSynthesizer.shared.isSpeaking()

@@ -1,14 +1,22 @@
-import type { EnvironmentId } from "@t3tools/contracts";
-import { type ReactNode } from "react";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { type ReactNode, useEffect, useRef } from "react";
 import { ActivityIndicator, Platform, Pressable, View } from "react-native";
 import Animated, { FadeInUp, FadeOutUp, ReduceMotion } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { FullWindowOverlay } from "react-native-screens";
+import * as Option from "effect/Option";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { appNavigationRef } from "../../lib/appNavigation";
-import { useReadAloud } from "./useReadAloud";
+import { useThreadDetail } from "../../state/use-thread-detail";
+import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
+import {
+  useReadAloud,
+  useArmedReadAloudTargets,
+  disarmReadAloudOnNextReply,
+  type ArmedReadAloudTarget,
+} from "./useReadAloud";
 
 const AUDIO_BAR_ENTERING = FadeInUp.duration(200).reduceMotion(ReduceMotion.System);
 const AUDIO_BAR_EXITING = FadeOutUp.duration(160).reduceMotion(ReduceMotion.System);
@@ -168,9 +176,67 @@ export function ThreadAudioBar(props?: {
 }
 
 /**
+ * Watches an armed thread that is awaiting an assistant reply.
+ * Because this is mounted in the global coordinator, it keeps the Effect atom
+ * for the thread mounted, maintaining the live SSE connection even when the
+ * user navigates away from the thread detail screen or locks the device.
+ */
+function ArmedThreadAudioWatcher(props: { readonly target: ArmedReadAloudTarget }) {
+  const { target } = props;
+  const { speak } = useReadAloud(target.environmentId);
+  const threadDetailState = useThreadDetail({
+    environmentId: target.environmentId,
+    threadId: target.threadId as ThreadId,
+  });
+
+  const lastSeenSpokenMessageIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const projection = Option.getOrNull(threadDetailState.data);
+    if (!projection?.messages) return;
+
+    const messages = projection.messages;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const msg = messages[index];
+      if (msg && msg.role === "assistant") {
+        if (!msg.streaming && msg.text && msg.text.trim().length > 0) {
+          if (lastSeenSpokenMessageIdRef.current !== msg.id) {
+            lastSeenSpokenMessageIdRef.current = msg.id;
+            disarmReadAloudOnNextReply(target.threadId);
+            void speak({
+              key: msg.id,
+              text: cleanTextForSpeech(msg.text),
+              threadId: target.threadId,
+              environmentId: target.environmentId ?? undefined,
+              title: target.threadTitle ?? "Antwort",
+            });
+          }
+          break;
+        }
+      }
+    }
+  }, [threadDetailState, target, speak]);
+
+  return null;
+}
+
+function GlobalAudioWatchers() {
+  const armedTargets = useArmedReadAloudTargets();
+
+  return (
+    <>
+      {armedTargets.map((target) => (
+        <ArmedThreadAudioWatcher key={target.threadId} target={target} />
+      ))}
+    </>
+  );
+}
+
+/**
  * Global audio player host mounted once at the app root level.
  * Floats the player bar across all screens (Home, Threads, Settings, Modals)
  * without ever unmounting or stopping playback on navigation.
+ * Also keeps armed background threads synchronized via GlobalAudioWatchers.
  */
 export function GlobalAudioPlayerControl(props: { readonly children: ReactNode }) {
   const { speech } = useReadAloud();
@@ -179,6 +245,7 @@ export function GlobalAudioPlayerControl(props: { readonly children: ReactNode }
 
   return (
     <>
+      <GlobalAudioWatchers />
       <View pointerEvents="box-none" className="flex-1">
         {props.children}
       </View>

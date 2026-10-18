@@ -692,10 +692,19 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const sendAfterDictationRef = useRef(false);
   const handleSendAndReadAloud = useCallback(
     async (followUp?: ActiveTurnComposerAction) => {
-      armReadAloudOnNextReply(String(props.selectedThread.id));
+      armReadAloudOnNextReply({
+        threadId: String(props.selectedThread.id),
+        environmentId: props.selectedThread.environmentId,
+        threadTitle: props.selectedThread.title,
+      });
       await handleSend(followUp);
     },
-    [handleSend, props.selectedThread.id],
+    [
+      handleSend,
+      props.selectedThread.environmentId,
+      props.selectedThread.id,
+      props.selectedThread.title,
+    ],
   );
 
   const stopDictationAndSend = useCallback(() => {
@@ -704,9 +713,18 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   }, [voiceInput]);
 
   const stopDictationAndSendAndReadAloud = useCallback(() => {
-    armReadAloudOnNextReply(String(props.selectedThread.id));
+    armReadAloudOnNextReply({
+      threadId: String(props.selectedThread.id),
+      environmentId: props.selectedThread.environmentId,
+      threadTitle: props.selectedThread.title,
+    });
     stopDictationAndSend();
-  }, [props.selectedThread.id, stopDictationAndSend]);
+  }, [
+    props.selectedThread.environmentId,
+    props.selectedThread.id,
+    props.selectedThread.title,
+    stopDictationAndSend,
+  ]);
   useEffect(() => {
     if (!sendAfterDictationRef.current) return;
     const phase = voiceInput.state.phase;

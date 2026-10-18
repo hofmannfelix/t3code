@@ -116,7 +116,11 @@ vi.mock("expo-audio", () => ({
   setAudioModeAsync: harness.setAudioModeAsync,
   setIsAudioActiveAsync: harness.setIsAudioActiveAsync,
 }));
+vi.mock("expo", () => ({
+  requireOptionalNativeModule: () => null,
+}));
 vi.mock("react-native", () => ({
+  Platform: { OS: "ios" },
   Alert: {
     alert: (title: string, message?: string) =>
       harness.alerts.push({ title, message: message ?? "" }),
@@ -182,6 +186,8 @@ vi.mock("./deviceTts", () => ({
 
 import {
   armReadAloudOnNextReply,
+  disarmReadAloudOnNextReply,
+  getArmedReadAloudTargets,
   isReadAloudArmedOnNextReply,
   SYNTHESIZE_TIMEOUT_MS,
   useReadAloud,
@@ -746,5 +752,26 @@ describe("useReadAloudAutoAnnounce", () => {
 
     expect(pl.release).not.toHaveBeenCalled();
     expect(view.speech().phase).toBe("playing");
+  });
+
+  it("arms with thread details and disarms cleanly for background synchronization", () => {
+    armReadAloudOnNextReply({
+      threadId: "thread-42",
+      environmentId: "env-test" as EnvironmentId,
+      threadTitle: "My Test Thread",
+    });
+
+    expect(isReadAloudArmedOnNextReply("thread-42")).toBe(true);
+    const targets = getArmedReadAloudTargets();
+    expect(targets).toHaveLength(1);
+    expect(targets[0]).toMatchObject({
+      threadId: "thread-42",
+      environmentId: "env-test",
+      threadTitle: "My Test Thread",
+    });
+
+    disarmReadAloudOnNextReply("thread-42");
+    expect(isReadAloudArmedOnNextReply("thread-42")).toBe(false);
+    expect(getArmedReadAloudTargets()).toHaveLength(0);
   });
 });
