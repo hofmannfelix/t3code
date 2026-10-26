@@ -14,7 +14,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { FullWindowOverlay } from "react-native-screens";
 import * as Option from "effect/Option";
 
-import { SymbolView } from "../../components/AppSymbol";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { appNavigationRef } from "../../lib/appNavigation";
 import { useThreadDetail } from "../../state/use-thread-detail";
 import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
