@@ -22,10 +22,6 @@ export function voiceInputBlocksSubmission(state: VoiceInputState): boolean {
   );
 }
 
-export function voiceInputFreezesEditor(state: VoiceInputState): boolean {
-  return voiceInputBlocksSubmission(state);
-}
-
 export type VoiceDraftSnapshot = {
   readonly ownerKey: string;
   readonly text: string;
@@ -562,9 +558,7 @@ export class VoiceInputController {
       }
       try {
         this.dependencies.deleteRecording(uri);
-      } catch {
-        // The cache may already have removed a failed or interrupted recording.
-      }
+      } catch {}
     }
     if (preserveRetryable && this.retryableRecording) {
       this.ownedRecordingUris.clear();
@@ -589,9 +583,7 @@ export class VoiceInputController {
     try {
       await this.dependencies.releaseRecording();
       this.recordingConfigured = false;
-    } catch {
-      // Final cleanup retries if the prompt release before transcription fails.
-    }
+    } catch {}
   }
 
   private invalidateOperation(): void {

@@ -1,6 +1,8 @@
-import { HStack, Image, Link, Spacer, Text, VStack, ZStack } from "@expo/ui/swift-ui";
+import { Circle, HStack, Image, Link, Spacer, Text, VStack, ZStack } from "@expo/ui/swift-ui";
 import type { ComponentProps } from "react";
 import {
+  accessibilityElement,
+  accessibilityLabel,
   activityBackgroundTint,
   background,
   cornerRadius,
@@ -9,6 +11,7 @@ import {
   frame,
   layoutPriority,
   lineLimit,
+  minimumScaleFactor,
   padding,
   resizable,
   widgetURL,
@@ -73,9 +76,6 @@ export function AgentActivity(
   const monochrome =
     environment.widgetRenderingMode === "accented" || environment.widgetRenderingMode === "vibrant";
 
-  // Status tints mirror the web sidebar's pills
-  // (apps/web/src/components/Sidebar.logic.ts resolveThreadStatusPill): amber
-  // for approval, indigo for input, sky for working, emerald for completed.
   // On iPhone the LA sits on a dark material, but macOS (iPhone Mirroring /
   // Mac notification center) renders it on a light one — so pick the web
   // palette's light (-600) or dark (-300) variant off the color scheme.
@@ -89,24 +89,22 @@ export function AgentActivity(
     }
     switch (phase) {
       case "waiting_for_approval":
-        return isLightScheme ? "#d97706" : "#fcd34d"; // amber-600 / amber-300
+        return isLightScheme ? "#d97706" : "#fcd34d";
       case "waiting_for_input":
-        return isLightScheme ? "#4f46e5" : "#a5b4fc"; // indigo-600 / indigo-300
+        return isLightScheme ? "#4f46e5" : "#a5b4fc";
       case "failed":
-        return isLightScheme ? "#dc2626" : "#fca5a5"; // red-600 / red-300
+        return isLightScheme ? "#dc2626" : "#fca5a5";
       case "completed":
-        return isLightScheme ? "#059669" : "#6ee7b7"; // emerald-600 / emerald-300
+        return isLightScheme ? "#059669" : "#6ee7b7";
       case "stale":
         return secondaryForeground;
       case "starting":
       case "running":
       default:
-        return isLightScheme ? "#0284c7" : "#7dd3fc"; // sky-600 / sky-300
+        return isLightScheme ? "#0284c7" : "#7dd3fc";
     }
   };
 
-  // Order attention-first so whatever needs the user floats to the top of every
-  // presentation, then failures, then in-flight work, then finished/stale.
   const phasePriority = (phase: AgentActivityPhase): number => {
     if (phase === "waiting_for_approval" || phase === "waiting_for_input") return 0;
     if (phase === "failed") return 1;
@@ -115,7 +113,7 @@ export function AgentActivity(
   };
   // Past the stale date the system stops vouching for the content, so every
   // in-flight row degrades to "stale" rather than claiming an agent is still
-  // working. Terminal phases keep their own state.
+  // working.
   const activities: ReadonlyArray<AgentActivityRowProps> = environment.isStale
     ? props.activities.map((row) =>
         row.phase === "completed" || row.phase === "failed"
@@ -147,7 +145,6 @@ export function AgentActivity(
   const failedRow = activities.find((row) => row.phase === "failed");
   const heroRow = attentionRow ?? failedRow ?? row0;
   const tint = phaseTint(heroRow?.phase);
-  // Headline count leans on the accent when a human is actually blocked.
   const headerTint = attentionRow
     ? phaseTint(attentionRow.phase)
     : failedRow
@@ -165,9 +162,6 @@ export function AgentActivity(
   const doneLabel = failedRow ? "Failed" : "Done";
   const outcomeLabel = failedRow ? "Agent work failed" : "Agent work completed";
 
-  // Header copy: "5 active agents" + (", 1 needs attention"). The banner renders
-  // the two parts in-line so the attention half can carry the accent color;
-  // `summary` is the short form for tight spots (expanded center, watch card).
   const agentWord = props.activeCount === 1 ? "agent" : "agents";
   const agentsLabel = allDone
     ? outcomeLabel
@@ -185,6 +179,8 @@ export function AgentActivity(
     : environment.isStale
       ? "Out of date"
       : `${props.activeCount} active`;
+  const showCompactCount = !attentionRow && !allDone && !environment.isStale;
+  const compactCountLabel = props.activeCount > 99 ? "99+" : `${props.activeCount}`;
   const summary = attentionSuffix || activeLabel;
 
   // Any registered scheme variant routes back to this app; taps are delivered
@@ -194,6 +190,7 @@ export function AgentActivity(
     deepLinkRow && deepLinkRow.deepLink.startsWith("/") && !deepLinkRow.deepLink.startsWith("//")
       ? `t3code://${deepLinkRow.deepLink.slice(1)}`
       : null;
+  const linkModifiers = deepLink ? [widgetURL(deepLink)] : [];
 
   const voiceLink =
     deepLinkRow && deepLinkRow.deepLink.startsWith("/") && !deepLinkRow.deepLink.startsWith("//")
@@ -225,8 +222,15 @@ export function AgentActivity(
 
   // SF Symbols, like the logo, ignore frame/foregroundStyle applied directly to
   // the image; size + tint them through a container the resizable symbol fills.
-  const renderGlyph = (systemName: SFName, size: number, color: Foreground) => (
-    <HStack modifiers={[frame({ width: size, height: size }), foregroundStyle(color)]}>
+  const renderGlyph = (
+    systemName: SFName,
+    size: number,
+    color: Foreground,
+    modifiers: typeof linkModifiers = [],
+  ) => (
+    <HStack
+      modifiers={[frame({ width: size, height: size }), foregroundStyle(color), ...modifiers]}
+    >
       <Image systemName={systemName} modifiers={[resizable()]} />
     </HStack>
   );
@@ -321,14 +325,14 @@ export function AgentActivity(
     return content;
   };
 
-  // The branded T3 mark. `assetName` resolves the template image set bundled in
-  // the widget extension's asset catalog. Image views only honor `resizable`
-  // directly (frame/foregroundStyle are dropped), so we size it via a container
-  // frame the resizable image fills and tint it through the container's
-  // foreground style, which the template image inherits. The 3:2 frame matches
-  // the glyph's aspect ratio so it never distorts.
-  const renderLogo = (height: number, color: Foreground) => (
-    <HStack modifiers={[frame({ width: height * 1.5, height }), foregroundStyle(color)]}>
+  // Image views only honor `resizable` directly (frame/foregroundStyle are
+  // dropped), so we size it via a container frame the resizable image fills and
+  // tint it through the container's foreground style, which the template image
+  // inherits. The 3:2 frame matches the glyph's aspect ratio so it never distorts.
+  const renderLogo = (height: number, color: Foreground, modifiers: typeof linkModifiers = []) => (
+    <HStack
+      modifiers={[frame({ width: height * 1.5, height }), foregroundStyle(color), ...modifiers]}
+    >
       <Image assetName="T3Mark" modifiers={[resizable()]} />
     </HStack>
   );
@@ -414,8 +418,6 @@ export function AgentActivity(
         {row4 ? renderInteractiveRow(row4) : null}
       </VStack>
     ),
-    // Compact card for the watchOS Smart Stack + CarPlay (the `.small` family):
-    // brand + count, then the single most important agent with its status glyph.
     bannerSmall: (
       <VStack alignment="leading" spacing={5} modifiers={[padding({ all: 10 })]}>
         <HStack spacing={7} alignment="center">
@@ -455,42 +457,81 @@ export function AgentActivity(
         ) : null}
       </VStack>
     ),
-    compactLeading: (
+    compactLeading: hasAudioActive ? (
       <HStack spacing={3} alignment="center">
-        {renderLogo(14, tint)}
-        {hasAudioActive ? (
-          <Image
-            systemName="speaker.wave.2.fill"
+        {renderLogo(14, tint, linkModifiers)}
+        <Image
+          systemName="speaker.wave.2.fill"
+          modifiers={[
+            frame({ width: 11, height: 11 }),
+            resizable(),
+            foregroundStyle(isLightScheme ? "#059669" : "#34d399"),
+          ]}
+        />
+      </HStack>
+    ) : (
+      renderLogo(14, tint, linkModifiers)
+    ),
+    compactTrailing:
+      hasAudioActive && props.activeCount <= 1 ? (
+        <HStack spacing={3} alignment="center">
+          <Text
             modifiers={[
-              frame({ width: 11, height: 11 }),
-              resizable(),
-              foregroundStyle(isLightScheme ? "#059669" : "#34d399"),
+              font({ weight: "semibold", size: 11 }),
+              foregroundStyle(tint),
+              ...linkModifiers,
             ]}
-          />
-        ) : null}
-      </HStack>
-    ),
-    compactTrailing: (
-      <HStack spacing={3} alignment="center">
-        <Text modifiers={[font({ weight: "semibold", size: 11 }), foregroundStyle(tint)]}>
-          {hasAudioActive && props.activeCount <= 1
-            ? "Audio"
-            : attentionRow
-              ? attentionRow.phase === "waiting_for_approval"
-                ? "Approval"
-                : "Input"
-              : activeLabel}
+          >
+            Audio
+          </Text>
+        </HStack>
+      ) : showCompactCount ? (
+        <ZStack
+          modifiers={[
+            frame({ width: 28, height: 28 }),
+            accessibilityElement("ignore"),
+            accessibilityLabel(agentsLabel),
+            ...linkModifiers,
+          ]}
+        >
+          <Circle modifiers={[foregroundStyle(tint)]} />
+          <Text
+            modifiers={[
+              font({ weight: "bold", size: 14 }),
+              foregroundStyle("#000000"),
+              lineLimit(1),
+              minimumScaleFactor(0.75),
+              frame({ width: 24, height: 28 }),
+            ]}
+          >
+            {compactCountLabel}
+          </Text>
+        </ZStack>
+      ) : (
+        <Text
+          modifiers={[
+            font({ weight: "semibold", size: 11 }),
+            foregroundStyle(tint),
+            lineLimit(1),
+            minimumScaleFactor(0.5),
+            ...linkModifiers,
+          ]}
+        >
+          {attentionRow
+            ? attentionRow.phase === "waiting_for_approval"
+              ? "Approval"
+              : "Input"
+            : activeLabel}
         </Text>
-      </HStack>
-    ),
+      ),
     // The shared/minimal form is a ~22pt circle — a single signal reads there,
     // the wordmark does not. Show the blocking/outcome phase glyph, else the
     // mark (all-done shows the hero row's checkmark/cross).
     minimal: hasAudioActive
-      ? renderGlyph("speaker.wave.2.fill", 13, isLightScheme ? "#059669" : "#34d399")
+      ? renderGlyph("speaker.wave.2.fill", 13, isLightScheme ? "#059669" : "#34d399", linkModifiers)
       : (attentionRow || failedRow || allDone) && heroRow
-        ? renderGlyph(phaseSymbol(heroRow.phase), 13, phaseTint(heroRow.phase))
-        : renderLogo(11, tint),
+        ? renderGlyph(phaseSymbol(heroRow.phase), 13, phaseTint(heroRow.phase), linkModifiers)
+        : renderLogo(11, tint, linkModifiers),
     expandedLeading: (
       <HStack spacing={5} alignment="center" modifiers={[padding({ leading: 4, vertical: 4 })]}>
         {renderLogo(15, tint)}
