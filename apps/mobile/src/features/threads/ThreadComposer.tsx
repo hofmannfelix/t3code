@@ -30,7 +30,7 @@ import {
 import { StackActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-import { Keyboard, Platform, View, type ViewStyle } from "react-native";
+import { Keyboard, Platform, type StyleProp, View, type ViewStyle } from "react-native";
 import { composerImageGallery } from "../../lib/composerImageGallery";
 import { filePreviewGallery } from "../../lib/filePreviewGallery";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
@@ -40,6 +40,7 @@ import {
   composerAttachmentUploadsAtom,
 } from "../../state/composer-attachment-uploads";
 import Animated, {
+  type AnimatedStyle,
   FadeIn,
   FadeOut,
   type LayoutAnimationFunction,
@@ -148,7 +149,8 @@ export function useCompactComposerEditor(text: ScaledTextRole, value: string) {
   const rowWidth = useSharedValue(0);
   const editorX = useSharedValue(0);
   const editorWidth = useSharedValue(0);
-  const inset = Platform.OS === "android" ? 0 : collapsedEditorInset(text);
+  const inset =
+    Platform.OS === "android" ? COLLAPSED_EDITOR_DEFAULT_INSET : collapsedEditorInset(text);
   const minimum = Math.max(INLINE_EDITOR_HEIGHT, Math.ceil(text.lineHeight) + 2 * inset);
   const height = Math.max(
     minimum,
@@ -217,7 +219,7 @@ export function useCompactComposerEditor(text: ScaledTextRole, value: string) {
       }
     },
     editorProps: {
-      singleLineCentered: false,
+      singleLineCentered: !isExpanded,
       scrollEnabled: Platform.OS === "android" || contentHeight >= text.lineHeight * 4,
       contentInsetVertical: inset,
       onContentSizeChange: (size: { width: number; height: number }) => {
@@ -379,6 +381,7 @@ function SendActionButton(props: {
 export function ComposerSurface(props: {
   readonly children: ReactNode;
   readonly style: ViewStyle;
+  readonly containerStyle?: StyleProp<AnimatedStyle<ViewStyle>>;
   readonly animateLayout?: boolean;
 }) {
   const colors = useUniwindTheme();
@@ -387,12 +390,14 @@ export function ComposerSurface(props: {
   const animatedBorderRadius = useSharedValue(targetBorderRadius);
   const shouldAnimate = props.animateLayout !== false && Platform.OS !== "android";
   useLayoutEffect(() => {
-    animatedBorderRadius.value = shouldAnimate
-      ? withTiming(targetBorderRadius, {
-          duration: COMPOSER_TRANSITION_DURATION_MS,
-          reduceMotion: ReduceMotion.System,
-        })
-      : targetBorderRadius;
+    animatedBorderRadius.set(
+      shouldAnimate
+        ? withTiming(targetBorderRadius, {
+            duration: COMPOSER_TRANSITION_DURATION_MS,
+            reduceMotion: ReduceMotion.System,
+          })
+        : targetBorderRadius,
+    );
   }, [animatedBorderRadius, shouldAnimate, targetBorderRadius]);
   const borderCurve = props.style.borderCurve;
   const animatedShapeStyle = useAnimatedStyle(() => ({
@@ -414,6 +419,7 @@ export function ComposerSurface(props: {
         {
           overflow: "hidden",
         },
+        props.containerStyle,
       ]}
     >
       <AnimatedGlassSurface
@@ -431,7 +437,7 @@ export function ComposerSurface(props: {
       <Animated.View
         collapsable={false}
         layout={layoutTransition}
-        style={[props.style, animatedShapeStyle]}
+        style={[props.style, animatedShapeStyle, props.containerStyle]}
       >
         {props.children}
       </Animated.View>
@@ -463,6 +469,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const settingsRoutePresentedRef = useRef(false);
   const wasExpandedBeforePreviewRef = useRef(false);
   const inFlightThreadIdsRef = useRef(new Set<string>());
+  const sendAfterDictationRef = useRef(false);
   const { isActive: isAudioModeActive } = useThreadAudioMode(
     props.selectedThread ? String(props.selectedThread.id) : null,
     {
@@ -698,52 +705,48 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     const threadKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
     if (inFlightThreadIdsRef.current.has(threadKey)) return;
     inFlightThreadIdsRef.current.add(threadKey);
-    try {
-      if (isAudioModeActive) {
-        armReadAloudOnNextReply({
-          threadId: String(props.selectedThread.id),
-          environmentId: props.selectedThread.environmentId,
-          threadTitle: props.selectedThread.title,
-          projectTitle: project?.title ?? props.environmentLabel ?? "T3 Code",
-        });
-      }
-      const draftAtSend = getComposerDraftSnapshot(composerDraftKey);
-      const stillSendable = () => {
-        const draft = getComposerDraftSnapshot(composerDraftKey);
-        return (
-          pendingPastedTextAttachmentCountRef.current === 0 &&
-          pendingNativeImagePasteCountRef.current === 0 &&
-          draft.text === draftAtSend.text &&
-          draft.attachments.length === draftAtSend.attachments.length &&
-          draft.attachments.every(
-            (attachment, index) => attachment.id === draftAtSend.attachments[index]?.id,
-          )
-        );
-      };
-      const sent = await settlePromise(() => onSendMessage(followUp, stillSendable));
-      if (AsyncResult.isFailure(sent)) {
-        // The composer state already surfaces send errors; only the lock needed releasing.
-        console.error("[composer] send failed", squashAtomCommandFailure(sent));
-        return;
-      }
-      if (sent.value === null) return;
-      // Armed after the send so its preference read and native Activity start don't contend
-      // with the queued-message feedback on the tap frame.
-      armAgentAwarenessLiveActivityForLocalWork({
-        environmentId: props.environmentId,
+    if (isAudioModeActive) {
+      armReadAloudOnNextReply({
+        threadId: String(props.selectedThread.id),
+        environmentId: props.selectedThread.environmentId,
         threadTitle: props.selectedThread.title,
-        projectTitle: props.environmentLabel ?? "T3 Code",
+        projectTitle: project?.title ?? props.environmentLabel ?? "T3 Code",
       });
-    } finally {
-      inFlightThreadIdsRef.current.delete(threadKey);
     }
+    const draftAtSend = getComposerDraftSnapshot(composerDraftKey);
+    const stillSendable = () => {
+      const draft = getComposerDraftSnapshot(composerDraftKey);
+      return (
+        pendingPastedTextAttachmentCountRef.current === 0 &&
+        pendingNativeImagePasteCountRef.current === 0 &&
+        draft.text === draftAtSend.text &&
+        draft.attachments.length === draftAtSend.attachments.length &&
+        draft.attachments.every(
+          (attachment, index) => attachment.id === draftAtSend.attachments[index]?.id,
+        )
+      );
+    };
+    const sent = await settlePromise(() => onSendMessage(followUp, stillSendable));
+    inFlightThreadIdsRef.current.delete(threadKey);
+    if (AsyncResult.isFailure(sent)) {
+      // The composer state already surfaces send errors; only the lock needed releasing.
+      console.error("[composer] send failed", squashAtomCommandFailure(sent));
+      return;
+    }
+    if (sent.value === null) return;
+    // Armed after the send so its preference read and native Activity start don't contend
+    // with the queued-message feedback on the tap frame.
+    armAgentAwarenessLiveActivityForLocalWork({
+      environmentId: props.environmentId,
+      threadTitle: props.selectedThread.title,
+      projectTitle: props.environmentLabel ?? "T3 Code",
+    });
   };
 
   // Gemini-style direct send: tapping send while dictating stops the
   // recording; the moment the transcript lands in the draft it goes out
   // through the regular send path. A cancelled or failed transcription
   // keeps the draft and sends nothing.
-  const sendAfterDictationRef = useRef(false);
   const stopDictationAndSend = useCallback(() => {
     sendAfterDictationRef.current = true;
     if (isAudioModeActive) {
@@ -919,9 +922,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
         reportedSelection={props.reportedModelSelection}
         prompt={draftMessage}
         surfaceColor={composerPanel}
-        iconOnly={
-          (draftMessage.length > 0 || stripAttachments.length > 0) && !compactEditor.isExpanded
-        }
+        iconOnly={!compactEditor.isExpanded}
         onPress={openSettings}
       />
     </View>
@@ -998,6 +999,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
 
         <ComposerSurface
           animateLayout={false}
+          containerStyle={compactEditor.containerStyle}
           style={{
             borderRadius: hasSidebarTabBar ? 31 : 27,
             borderCurve: "circular",
@@ -1007,13 +1009,14 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
         >
           {isExpanded ? editingAttachments : null}
           <View
+            style={{ flex: 1 }}
             onLayout={(event) => {
               compactEditor.onRowLayout(event);
               setCompactRowWidth(event.nativeEvent.layout.width);
             }}
           >
             <ComposerDictationDraftContent
-              className="flex-row items-end"
+              className="h-full flex-row items-end"
               compact
               hidden={showsCompactDictation}
             >
@@ -1036,7 +1039,6 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
                         ? 0
                         : INLINE_EDITOR_MIN_WIDTH,
                   },
-                  compactEditor.containerStyle,
                   compactEditor.isExpanded ? { flex: 0, width: 0 } : undefined,
                 ]}
               ></Animated.View>

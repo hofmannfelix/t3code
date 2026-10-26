@@ -1222,9 +1222,8 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     let fittedHeight = textView.sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height
       - textView.textContainerInset.top - textView.textContainerInset.bottom
     let measuredHeight = min(lineHeight * 4, fittedHeight)
-    let width = fittedHeight <= lineHeight + 0.5
-      ? textView.layoutManager.usedRect(for: textView.textContainer).width
-      : 0
+    let naturalWidth = ceil(textView.attributedText.size().width)
+    let width = max(naturalWidth, textView.layoutManager.usedRect(for: textView.textContainer).width)
     let nextSize = CGSize(width: ceil(width), height: ceil(measuredHeight))
     guard abs(nextSize.width - lastContentSize.width) > 0.5 ||
       abs(nextSize.height - lastContentSize.height) > 0.5 else {
