@@ -2270,6 +2270,65 @@ export function buildThreadFeed(
 export function gatherTurnTexts(
   entries: ReadonlyArray<ThreadFeedEntry>,
 ): ReadonlyMap<string, string> {
+  return gatherMessageTurnTexts(
+    entries.flatMap((entry) => (entry.type === "message" ? [entry.message] : [])),
+  );
+}
+
+export interface TurnPart {
+  readonly key: string;
+  readonly text: string;
+}
+
+/**
+ * Maps each finished assistant message to the finished messages of its turn up
+ * to and including itself, so read-aloud can skip parts already spoken.
+ */
+export function gatherMessageTurnParts(
+  messages: ReadonlyArray<{
+    readonly id: string;
+    readonly role: string;
+    readonly streaming: boolean;
+    readonly text: string;
+  }>,
+): ReadonlyMap<string, ReadonlyArray<TurnPart>> {
+  const map = new Map<string, ReadonlyArray<TurnPart>>();
+  let parts: Array<TurnPart> = [];
+  for (const message of messages) {
+    if (message.role === "user") {
+      parts = [];
+      continue;
+    }
+    if (message.streaming) continue;
+    const text = renderAssistantCitationsAsText(message.text).trim();
+    if (text.length === 0) continue;
+    parts = [...parts, { key: message.id, text }];
+    map.set(message.id, parts);
+  }
+  return map;
+}
+
+export function gatherTurnParts(
+  entries: ReadonlyArray<ThreadFeedEntry>,
+): ReadonlyMap<string, ReadonlyArray<TurnPart>> {
+  return gatherMessageTurnParts(
+    entries.flatMap((entry) => (entry.type === "message" ? [entry.message] : [])),
+  );
+}
+
+/**
+ * Maps each finished assistant message to the text of its whole turn: every
+ * assistant message since the last user message, so reading one reply aloud
+ * includes the messages the agent wrote before it in the same turn.
+ */
+export function gatherMessageTurnTexts(
+  messages: ReadonlyArray<{
+    readonly id: string;
+    readonly role: string;
+    readonly streaming: boolean;
+    readonly text: string;
+  }>,
+): ReadonlyMap<string, string> {
   const map = new Map<string, string>();
   let texts: Array<string> = [];
   let keys: Array<string> = [];
@@ -2281,9 +2340,7 @@ export function gatherTurnTexts(
     texts = [];
     keys = [];
   };
-  for (const entry of entries) {
-    if (entry.type !== "message") continue;
-    const message = entry.message;
+  for (const message of messages) {
     if (message.role === "user") {
       flush();
       continue;

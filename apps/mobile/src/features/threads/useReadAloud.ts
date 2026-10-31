@@ -28,7 +28,17 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { Directory, File, Paths } from "expo-file-system";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import { getDeviceTtsConfig, streamWavSegments } from "./deviceTts";
+import {
+  audioDurationSeconds,
+  estimateSpeechSeconds,
+  isTimelineExact,
+  locateTimelineTime,
+  timelineDuration,
+  timelinePosition,
+  type ReadAloudTimeline,
+} from "./readAloudTimeline";
 import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
+import type { TurnPart } from "../../lib/threadActivity";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentThreadShells } from "../../state/threads";
 import { environmentProjects } from "../../state/projects";
@@ -56,8 +66,12 @@ interface ReadItem {
   readonly clipUri?: string;
 }
 
-interface QueueEntry extends ReadItem {
-  readonly dedupeKey: string;
+/** Whole-reply playback position, rounded to seconds so subscribers re-render at most once per second. */
+export interface ReadAloudProgress {
+  readonly position: number;
+  readonly duration: number;
+  /** False while the duration still includes text-length estimates. */
+  readonly exact: boolean;
 }
 
 interface ThreadFeedMessageEntry {
@@ -218,23 +232,30 @@ if (
           }
         }
       } else if (cmd === "skipForward") {
-        if (playlist) {
-          try {
-            void playlist.seekTo(playlist.currentTime + 10);
-          } catch {}
-        }
+        seekReadAloudBy(10);
       } else if (cmd === "skipBackward") {
-        if (playlist) {
-          try {
-            void playlist.seekTo(Math.max(0, playlist.currentTime - 10));
-          } catch {}
-        }
+        seekReadAloudBy(-10);
+      } else if (cmd === "previousTrack") {
+        skipToPreviousAnswer();
+      } else if (cmd === "nextTrack") {
+        skipToNextAnswer();
       } else if (cmd === "stop") {
         stopGlobalAudioSession();
       }
     });
   } catch {}
 }
+
+/**
+ * ±10s seeks across playlist items through `seekReadAloudBy`. Not marked as a
+ * live stream: iOS then offers only Stop, which ends the whole audio session.
+ */
+const READ_ALOUD_LOCK_SCREEN_OPTIONS = {
+  showPreviousTrack: false,
+  showNextTrack: false,
+  showSeekForward: true,
+  showSeekBackward: true,
+} as const;
 
 const START_WATCHDOG_MS = 5_000;
 const STREAM_START_TIMEOUT_MS = 20_000;
@@ -557,6 +578,11 @@ const log = (...args: unknown[]) => {
 
 let activeAudioLiveActivity: ReturnType<typeof startAgentLiveActivity> = null;
 
+let lastAudioLiveActivitySignature: string | null = null;
+
+/** Thread rows in the Live Activity follow the thread list, not only playback changes. */
+export const refreshAudioLiveActivity = () => syncAudioLiveActivity(currentSpeech);
+
 export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
   if (Platform.OS !== "ios") return;
   try {
@@ -581,6 +607,7 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
     }
 
     const nowIso = new Date().toISOString();
+    const isWaiting = speech.phase === null;
     const audioStatus =
       speech.phase === "loading"
         ? "Lade Audio..."
@@ -588,7 +615,7 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
           ? "Liest Antwort vor"
           : speech.phase === "paused"
             ? "Pausiert"
-            : "Audio-Session aktiv";
+            : "Warte auf Antwort";
 
     const targetEnvId = speech.environmentId
       ? String(speech.environmentId)
@@ -598,8 +625,10 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
     const targetThreadId = speech.threadId ?? activeAudioSessionTarget?.threadId ?? "";
     const targetProjectTitle =
       speech.projectTitle ?? activeAudioSessionTarget?.projectTitle ?? "T3 Code";
-    const targetThreadTitle =
-      speech.title ?? activeAudioSessionTarget?.threadTitle ?? "Sprachausgabe";
+    // While waiting nothing is being read, so the row must not name a thread as if it played.
+    const targetThreadTitle = isWaiting
+      ? "Warte auf Antwort..."
+      : (speech.title ?? activeAudioSessionTarget?.threadTitle ?? "Sprachausgabe");
 
     const audioRowDeepLink =
       targetEnvId && targetThreadId
@@ -732,7 +761,7 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
     const allActivities = [audioRow, ...armedRows, ...workingRows, ...recentRows].slice(0, 5);
 
     const props: AgentActivityProps = {
-      title: speech.title || targetThreadTitle || "T3 Code",
+      title: isWaiting ? targetThreadTitle : speech.title || targetThreadTitle || "T3 Code",
       subtitle: audioStatus,
       activeCount: 1 + armedRows.length + workingRows.length,
       updatedAt: nowIso,
@@ -742,6 +771,13 @@ export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
       audioProjectTitle: targetProjectTitle,
       activities: allActivities,
     };
+
+    // iOS budgets Live Activity updates; skip ones that change nothing but timestamps.
+    const signature = JSON.stringify(props, (key, value) =>
+      key === "updatedAt" ? undefined : value,
+    );
+    if (activeAudioLiveActivity && signature === lastAudioLiveActivitySignature) return;
+    lastAudioLiveActivitySignature = signature;
 
     if (activeAudioLiveActivity) {
       void activeAudioLiveActivity.update(props);
@@ -797,6 +833,7 @@ const releasePlaylist = () => {
     } catch {}
     playlist = null;
   }
+  setTimeline(null);
 };
 
 const cleanupActiveSegments = () => {
@@ -820,7 +857,6 @@ const stopCurrent = () => {
   activeStreamAbort = null;
   answerBlockQueue = [];
   currentAnswerBlock = null;
-  currentBlockChunks = [];
   if (T3NativeControls?.stopSpeaking) {
     try {
       void T3NativeControls.stopSpeaking();
@@ -840,7 +876,6 @@ const announceExhausted = (message: string) => {
   }
   answerBlockQueue = [];
   currentAnswerBlock = null;
-  currentBlockChunks = [];
   isVoiceRecordingActive = false;
   pausedByVoiceInput = null;
   cleanupActiveSegments();
@@ -867,6 +902,43 @@ const ensureAudioSession = async () => {
   } catch {
     // Continue anyway; expo-audio often works regardless.
   }
+};
+
+/**
+ * Synthesis requests in flight per reply. Enough to stay ahead of playback
+ * without tripping free-tier rate limits.
+ */
+const SYNTHESIS_CONCURRENCY = 3;
+
+/** Starts `run` for each input in order, at most `limit` at a time. */
+const mapWithConcurrency = <A, B>(
+  inputs: ReadonlyArray<A>,
+  limit: number,
+  run: (input: A, index: number) => Promise<B>,
+): Array<Promise<B>> => {
+  const settlers = inputs.map(() => {
+    let resolve!: (value: B) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<B>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  });
+  let next = 0;
+  const worker = async () => {
+    while (next < inputs.length) {
+      const index = next;
+      next += 1;
+      try {
+        settlers[index]!.resolve(await run(inputs[index]!, index));
+      } catch (error) {
+        settlers[index]!.reject(error);
+      }
+    }
+  };
+  for (let slot = 0; slot < Math.min(limit, inputs.length); slot += 1) void worker();
+  return settlers.map((settler) => settler.promise);
 };
 
 /**
@@ -911,13 +983,20 @@ let activeSpeechEnvironmentId: EnvironmentId | null = null;
  */
 let answerBlockQueue: ReadItem[] = [];
 let currentAnswerBlock: ReadItem | null = null;
-let currentBlockChunks: QueueEntry[] = [];
+/** Answers already played or skipped this session, oldest first, for skipping back. */
+const playedAnswerBlocks: ReadItem[] = [];
+const MAX_PLAYED_ANSWER_BLOCKS = 20;
+/** Going back further into an answer than this restarts it instead of replaying the previous one. */
+const RESTART_ANSWER_THRESHOLD_SECONDS = 3;
 
 export { isAudioSessionOrPlaybackActive };
 
 registerAudioPlaybackActivePredicate(
   () => isAudioSessionActive || currentSpeech.phase !== null || answerBlockQueue.length > 0,
 );
+
+const MAX_ANNOUNCED_REPLY_KEYS = 200;
+const announcedReplyKeys = new Set<string>();
 
 let enqueueCounter = 0;
 let lastFailureAt = 0;
@@ -928,6 +1007,84 @@ let playlist: AudioPlaylist | null = null;
 let playlistSubscription: { remove: () => void } | null = null;
 let activeStreamAbort: AbortController | null = null;
 const activeSegmentUris = new Set<string>();
+
+let timeline: ReadAloudTimeline | null = null;
+let progress: ReadAloudProgress | null = null;
+const progressListeners = new Set<Listener>();
+
+const publishProgress = () => {
+  let next: ReadAloudProgress | null = null;
+  if (timeline !== null) {
+    const status = playlist?.currentStatus;
+    const index = status?.currentIndex ?? playlist?.currentIndex ?? 0;
+    const time = status?.currentTime ?? playlist?.currentTime ?? 0;
+    const duration = timelineDuration(timeline);
+    next = {
+      position: Math.floor(Math.min(timelinePosition(timeline, index, time), duration)),
+      duration: Math.round(duration),
+      exact: isTimelineExact(timeline),
+    };
+  }
+  if (
+    next?.position === progress?.position &&
+    next?.duration === progress?.duration &&
+    next?.exact === progress?.exact
+  ) {
+    return;
+  }
+  progress = next;
+  for (const listener of progressListeners) listener();
+};
+
+const setTimeline = (next: ReadAloudTimeline | null) => {
+  timeline = next;
+  publishProgress();
+};
+
+const setTimelineTrack = (index: number, seconds: number) => {
+  if (timeline === null || index >= timeline.tracks.length) return;
+  const tracks = [...timeline.tracks];
+  tracks[index] = { seconds, exact: true };
+  setTimeline({ ...timeline, tracks });
+};
+
+const subscribeProgress = (listener: Listener) => {
+  progressListeners.add(listener);
+  return () => progressListeners.delete(listener);
+};
+
+export const useReadAloudProgress = (): ReadAloudProgress | null =>
+  useSyncExternalStore(
+    subscribeProgress,
+    () => progress,
+    () => null,
+  );
+
+/** Seeks relative to the whole reply, crossing clip boundaries inside the playlist. */
+export const seekReadAloudBy = (deltaSeconds: number) => {
+  const pl = playlist;
+  if (!pl) return;
+  try {
+    const index = pl.currentIndex;
+    const current = timeline ? timelinePosition(timeline, index, pl.currentTime) : pl.currentTime;
+    const target = timeline
+      ? locateTimelineTime(timeline, current + deltaSeconds, pl.trackCount)
+      : { index, offset: Math.max(0, current + deltaSeconds) };
+    if (target.index !== index) pl.skipTo(target.index);
+    void pl.seekTo(target.offset);
+  } catch (e) {
+    log("seekReadAloudBy: failed", e);
+  }
+};
+
+/** Exact clip length from the file on disk; the estimate stays when it cannot be read. */
+const readClipSeconds = async (uri: string): Promise<number | null> => {
+  try {
+    return audioDurationSeconds(new Uint8Array(await new File(uri).arrayBuffer()));
+  } catch {
+    return null;
+  }
+};
 
 let isVoiceRecordingActive = false;
 let pausedByVoiceInput: "speech" | "waiting" | "idle" | null = null;
@@ -1037,7 +1194,7 @@ const startAnswerBlock = (item: ReadItem) => {
   }
   log("startAnswerBlock:", item.key, "source:", item.source);
   currentAnswerBlock = item;
-  currentBlockChunks = [];
+  isUserPausedState = false;
   speakStartedAt = Date.now();
   runCounter += 1;
   const run = runCounter;
@@ -1080,8 +1237,11 @@ const finishCurrentAnswerBlock = () => {
   );
   releasePlaylist();
   cleanupActiveSegments();
+  if (currentAnswerBlock !== null) {
+    playedAnswerBlocks.push(currentAnswerBlock);
+    if (playedAnswerBlocks.length > MAX_PLAYED_ANSWER_BLOCKS) playedAnswerBlocks.shift();
+  }
   currentAnswerBlock = null;
-  currentBlockChunks = [];
 
   if (answerBlockQueue.length > 0) {
     const nextBlock = answerBlockQueue.shift()!;
@@ -1114,6 +1274,7 @@ const enqueueAnswerBlock = (
     readonly environmentId?: EnvironmentId;
     readonly title?: string;
     readonly projectTitle?: string;
+    readonly turnParts?: ReadonlyArray<TurnPart>;
   },
   options?: { readonly forceImmediate?: boolean },
 ) => {
@@ -1125,8 +1286,24 @@ const enqueueAnswerBlock = (
     log("enqueueAnswerBlock: already in FIFO queue, ignoring duplicate", item.key);
     return;
   }
+  // The thread feed, armed watchers and completion watchers can all report the
+  // same reply; it is read once even after it finished playing.
+  if (item.source !== "manual" && announcedReplyKeys.has(item.key)) {
+    log("enqueueAnswerBlock: already announced, ignoring duplicate", item.key);
+    return;
+  }
 
-  const cleanedText = item.clipUri ? item.text : cleanTextForSpeech(item.text);
+  // An automatic reply reads its turn from the first part not spoken yet: a
+  // partial answer read mid-turn is not repeated when the rest arrives.
+  const turnParts = item.source !== "manual" ? item.turnParts : undefined;
+  const text =
+    turnParts && turnParts.length > 0
+      ? turnParts
+          .filter((part) => !announcedReplyKeys.has(part.key))
+          .map((part) => part.text)
+          .join("\n\n")
+      : item.text;
+  const cleanedText = item.clipUri ? text : cleanTextForSpeech(text);
   if (!item.clipUri && cleanedText.length === 0) {
     log("enqueueAnswerBlock: ignored, text is empty after sanitization");
     return;
@@ -1148,6 +1325,13 @@ const enqueueAnswerBlock = (
         threadId: item.threadId,
         projectTitle,
       });
+
+  for (const key of [item.key, ...(turnParts ?? []).map((part) => part.key)]) {
+    announcedReplyKeys.add(key);
+  }
+  while (announcedReplyKeys.size > MAX_ANNOUNCED_REPLY_KEYS) {
+    announcedReplyKeys.delete(announcedReplyKeys.values().next().value!);
+  }
 
   const blockItem: ReadItem = {
     key: item.key,
@@ -1178,7 +1362,10 @@ const enqueueAnswerBlock = (
     return;
   }
 
-  if (currentAnswerBlock === null && currentSpeech.phase === null && !isVoiceRecordingActive) {
+  // Only a playing answer may hold replies back. A paused waiting loop is not
+  // one: queueing behind it would leave the reply stranded until a newer one
+  // starts, and then it would play after that newer reply.
+  if (currentAnswerBlock === null && !isVoiceRecordingActive) {
     startAnswerBlock(blockItem);
   } else {
     answerBlockQueue.push(blockItem);
@@ -1195,24 +1382,52 @@ const enqueueAnswerBlock = (
   }
 };
 
-const skipToNextBlock = () => {
-  log("skipToNextBlock called, queued blocks:", answerBlockQueue.length);
-  if (answerBlockQueue.length > 0) {
-    if (activeStreamAbort) {
-      activeStreamAbort.abort();
-      activeStreamAbort = null;
-    }
-    releasePlaylist();
-    cleanupActiveSegments();
-    if (T3NativeControls?.stopSpeaking) {
-      try {
-        void T3NativeControls.stopSpeaking();
-      } catch {}
-    }
-    finishCurrentAnswerBlock();
-  } else {
-    stopCurrent();
+/** Silences whatever is producing the current answer without settling it. */
+const haltCurrentAnswerAudio = () => {
+  activeStreamAbort?.abort();
+  activeStreamAbort = null;
+  releasePlaylist();
+  cleanupActiveSegments();
+  if (T3NativeControls?.stopSpeaking) {
+    try {
+      void T3NativeControls.stopSpeaking();
+    } catch {}
   }
+};
+
+/** Ends the current answer early; the next queued answer starts, or audio goes idle. */
+export const skipToNextAnswer = () => {
+  log("skipToNextAnswer called, queued blocks:", answerBlockQueue.length);
+  if (currentAnswerBlock === null) return;
+  haltCurrentAnswerAudio();
+  finishCurrentAnswerBlock();
+};
+
+/**
+ * Podcast-style back: a few seconds into an answer it restarts that answer,
+ * at its start it replays the previous one and queues the current answer
+ * right after it.
+ */
+export const skipToPreviousAnswer = () => {
+  const current = currentAnswerBlock;
+  const position = progress?.position ?? 0;
+  const previous = playedAnswerBlocks.at(-1);
+  log("skipToPreviousAnswer called, position:", position, "history:", playedAnswerBlocks.length);
+  if (current !== null && playlist && (position >= RESTART_ANSWER_THRESHOLD_SECONDS || !previous)) {
+    try {
+      if (playlist.currentIndex !== 0) playlist.skipTo(0);
+      void playlist.seekTo(0);
+    } catch (e) {
+      log("skipToPreviousAnswer: restart failed", e);
+    }
+    return;
+  }
+  if (!previous) return;
+  playedAnswerBlocks.pop();
+  haltCurrentAnswerAudio();
+  if (current !== null) answerBlockQueue.unshift(current);
+  currentAnswerBlock = null;
+  startAnswerBlock(previous);
 };
 
 export function useReadAloud(environmentId?: EnvironmentId | null) {
@@ -1365,6 +1580,12 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         try {
           await ensureAudioSession();
           if (activeStreamAbort !== abort) return;
+          // The stream only reveals segment lengths as they arrive; until it ends,
+          // the rest of the reply counts as an estimate.
+          setTimeline({
+            tracks: [],
+            pendingSeconds: estimateSpeechSeconds(cleanTextForSpeech(item.text)),
+          });
 
           for await (const segmentUri of streamWavSegments(
             deviceTtsConfig,
@@ -1375,6 +1596,17 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
             if (activeStreamAbort !== abort) return;
             segmentIndex += 1;
             activeSegmentUris.add(segmentUri);
+            const segmentSeconds = await readClipSeconds(segmentUri);
+            if (activeStreamAbort !== abort) return;
+            if (timeline !== null) {
+              setTimeline({
+                tracks: [
+                  ...timeline.tracks,
+                  { seconds: segmentSeconds ?? 0, exact: segmentSeconds !== null },
+                ],
+                pendingSeconds: Math.max(0, timeline.pendingSeconds - (segmentSeconds ?? 0)),
+              });
+            }
 
             log("stream consumer: segment", segmentIndex, segmentUri);
 
@@ -1390,12 +1622,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
                     title: item.title ?? "Antwort",
                     artist: item.projectTitle ? `T3 Code · ${item.projectTitle}` : "T3 Code",
                   },
-                  {
-                    showPreviousTrack: true,
-                    showNextTrack: true,
-                    showSeekForward: true,
-                    showSeekBackward: true,
-                  },
+                  READ_ALOUD_LOCK_SCREEN_OPTIONS,
                 );
               } catch {}
 
@@ -1405,6 +1632,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
 
               playlistSubscription = pl.addListener("playlistStatusUpdate", (status) => {
                 if (activeStreamAbort !== abort) return;
+                publishProgress();
                 if (!started && status.isLoaded) {
                   pl.play();
                 }
@@ -1496,6 +1724,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
 
           clearTimeout(startWatchdog);
           streamDone = true;
+          if (timeline !== null) setTimeline({ ...timeline, pendingSeconds: 0 });
           log("stream consumer: complete stream", `${segmentIndex} segments`);
 
           // If the last track finished before the stream completion was marked
@@ -1519,202 +1748,15 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
     [deviceTtsConfig, speakWithNativeFallback],
   );
 
-  const playClip = useCallback(
-    async (chunkItem: ReadItem, isCurrent: () => boolean) => {
-      await ensureAudioSession();
-      if (!isCurrent()) return;
-
-      try {
-        let clipUri: string | null;
-        if (chunkItem.clipUri) {
-          clipUri = chunkItem.clipUri;
-        } else {
-          const result = await Promise.race([
-            ttsSynthesize({
-              environmentId: (chunkItem.environmentId ?? environmentId) as EnvironmentId,
-              input: { text: chunkItem.text },
-            }),
-            new Promise<never>((_, reject) => {
-              setTimeout(
-                () =>
-                  reject(
-                    new Error("The server did not answer. Check the connection and try again."),
-                  ),
-                SYNTHESIZE_TIMEOUT_MS,
-              );
-            }),
-          ]);
-          if (!isCurrent()) return;
-          if (result._tag !== "Success") {
-            if (await speakWithNativeFallback(chunkItem, isCurrent)) return;
-            announceExhausted(
-              "The server could not synthesize this reply. Check the read-aloud settings on your Mac.",
-            );
-            return;
-          }
-          clipUri =
-            httpBaseUrl === null ? null : resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
-          if (clipUri === null) {
-            if (await speakWithNativeFallback(chunkItem, isCurrent)) return;
-            announceExhausted("The reply clip could not be loaded. Reconnect and try again.");
-            return;
-          }
-          const clipFile = await File.downloadFileAsync(clipUri, new Directory(Paths.cache), {
-            idempotent: true,
-          });
-          clipUri = clipFile.uri;
-        }
-        if (!isCurrent()) return;
-
-        const clipPlaylist = (() => {
-          try {
-            return createAudioPlaylist({ sources: [{ uri: clipUri }] });
-          } catch (error) {
-            log("playlist: createAudioPlaylist FAILED", error, clipUri);
-            throw error;
-          }
-        })();
-
-        if (T3NativeControls?.pauseWaitingAudio) {
-          try {
-            void T3NativeControls.pauseWaitingAudio();
-          } catch {}
-        }
-        log(
-          "playlist: created",
-          chunkItem.clipUri ? "device segment" : "server clip",
-          `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
-          clipUri,
-        );
-        playlist = clipPlaylist;
-        try {
-          clipPlaylist.setActiveForLockScreen(
-            true,
-            {
-              title: chunkItem.title ?? "Antwort",
-              artist: chunkItem.projectTitle ? `T3 Code · ${chunkItem.projectTitle}` : "T3 Code",
-            },
-            {
-              showPreviousTrack: true,
-              showNextTrack: true,
-              showSeekForward: true,
-              showSeekBackward: true,
-            },
-          );
-        } catch {}
-
-        let started = false;
-
-        const startWatchdog = setTimeout(() => {
-          if (started || !isCurrent()) return;
-          releasePlaylist();
-          void (async () => {
-            if (await speakWithNativeFallback(chunkItem, isCurrent)) return;
-            announceExhausted("The reply clip did not start playing.");
-          })();
-        }, START_WATCHDOG_MS);
-
-        playlistSubscription = clipPlaylist.addListener("playlistStatusUpdate", (status) => {
-          if (!isCurrent()) return;
-          if (!started && status.isLoaded) {
-            if (isVoiceRecordingActive) {
-              log("playClip: voice recording active, holding loaded clip");
-              setSpeech({
-                key: chunkItem.key,
-                threadId: chunkItem.threadId ?? currentSpeech.threadId,
-                environmentId: chunkItem.environmentId ?? currentSpeech.environmentId,
-                title: chunkItem.title ?? currentSpeech.title,
-                projectTitle: chunkItem.projectTitle ?? currentSpeech.projectTitle,
-                phase: "paused",
-                source: chunkItem.source,
-                queued: answerBlockQueue.length,
-              });
-              pausedByVoiceInput = "speech";
-            } else {
-              clipPlaylist.play();
-            }
-          }
-          if (status.playing && !started) {
-            started = true;
-            clearTimeout(startWatchdog);
-            log(
-              "playlist: PLAYING",
-              `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
-              "queued:",
-              answerBlockQueue.length,
-            );
-            setSpeech({
-              key: chunkItem.key,
-              threadId: chunkItem.threadId ?? currentSpeech.threadId,
-              environmentId: chunkItem.environmentId ?? currentSpeech.environmentId,
-              title: chunkItem.title ?? currentSpeech.title,
-              projectTitle: chunkItem.projectTitle ?? currentSpeech.projectTitle,
-              phase: "playing",
-              source: chunkItem.source,
-              queued: answerBlockQueue.length,
-            });
-          }
-          if (started && !status.didJustFinish) {
-            if (!status.playing && currentSpeech.phase === "playing") {
-              log("playlistStatusUpdate (clip): remote paused");
-              setSpeech({
-                ...currentSpeech,
-                phase: "paused",
-              });
-            } else if (status.playing && currentSpeech.phase === "paused") {
-              log("playlistStatusUpdate (clip): remote resumed");
-              setSpeech({
-                ...currentSpeech,
-                phase: "playing",
-              });
-            }
-          }
-          if (status.didJustFinish) {
-            clearTimeout(startWatchdog);
-            releasePlaylist();
-            log(
-              "playlist: finished chunk, remaining in current block:",
-              currentBlockChunks.length,
-              "queued blocks:",
-              answerBlockQueue.length,
-            );
-            if (currentBlockChunks.length > 0) {
-              const nextChunk = currentBlockChunks.shift()!;
-              void playClip(nextChunk, isCurrent);
-            } else {
-              finishCurrentAnswerBlock();
-            }
-          }
-        });
-
-        setSpeech({
-          key: chunkItem.key,
-          threadId: chunkItem.threadId ?? currentSpeech.threadId,
-          environmentId: chunkItem.environmentId ?? currentSpeech.environmentId,
-          title: chunkItem.title ?? currentSpeech.title,
-          projectTitle: chunkItem.projectTitle ?? currentSpeech.projectTitle,
-          phase: "loading",
-          source: chunkItem.source,
-          queued: answerBlockQueue.length,
-        });
-        clipPlaylist.play();
-      } catch (error) {
-        if (!isCurrent()) return;
-        log("playlist: failed", error);
-        if (await speakWithNativeFallback(chunkItem, isCurrent)) return;
-        announceExhausted(
-          error instanceof Error && error.message.length > 0
-            ? error.message
-            : "The server did not answer. Check the connection and try again.",
-        );
-      }
-    },
-    [environmentId, httpBaseUrl, speakWithNativeFallback, ttsSynthesize],
-  );
-
-  const playServerOrClipBlock = useCallback(
+  /**
+   * Synthesizes every chunk of the reply up front, a few at a time, and plays
+   * them through one playlist so the reply behaves like a single track: one
+   * lock-screen entry, one position and duration, seeking across chunks. The
+   * lead chunk stays short so the first sound still arrives quickly.
+   */
+  const playServerBlock = useCallback(
     (item: ReadItem, isCurrent: () => boolean) => {
-      if (httpBaseUrl === null && !deviceTtsConfig && !item.clipUri) {
+      if (httpBaseUrl === null && !item.clipUri) {
         void (async () => {
           if (await speakWithNativeFallback(item, isCurrent)) return;
           announceExhausted("This environment is not connected right now.");
@@ -1722,27 +1764,239 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         return;
       }
 
-      if (item.clipUri) {
-        void playClip(item, isCurrent);
-        return;
-      }
-
-      const chunks = chunkedPlayback ? chunkReply(item.text) : [item.text];
-      const lead = chunks[0];
-      if (lead === undefined) {
+      const texts = item.clipUri || !chunkedPlayback ? [item.text] : chunkReply(item.text);
+      if (texts.length === 0) {
         finishCurrentAnswerBlock();
         return;
       }
 
-      currentBlockChunks = chunks.slice(1).map((text, idx) => ({
-        ...item,
-        text,
-        dedupeKey: `${item.key}#${idx + 1}`,
-      }));
+      const synthesizeChunk = async (text: string): Promise<string> => {
+        const result = await Promise.race([
+          ttsSynthesize({
+            environmentId: (item.environmentId ?? environmentId) as EnvironmentId,
+            input: { text },
+          }),
+          new Promise<never>((_, reject) => {
+            setTimeout(
+              () =>
+                reject(new Error("The server did not answer. Check the connection and try again.")),
+              SYNTHESIZE_TIMEOUT_MS,
+            );
+          }),
+        ]);
+        if (result._tag !== "Success") {
+          throw new Error(
+            "The server could not synthesize this reply. Check the read-aloud settings on your Mac.",
+          );
+        }
+        const url =
+          httpBaseUrl === null ? null : resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
+        if (url === null) {
+          throw new Error("The reply clip could not be loaded. Reconnect and try again.");
+        }
+        const file = await File.downloadFileAsync(url, new Directory(Paths.cache), {
+          idempotent: true,
+        });
+        return file.uri;
+      };
 
-      void playClip({ ...item, text: lead }, isCurrent);
+      void (async () => {
+        await ensureAudioSession();
+        if (!isCurrent()) return;
+
+        let pl: AudioPlaylist | null = null;
+        let abandoned = false;
+        const isLive = () => isCurrent() && !abandoned;
+        let started = false;
+        let allAdded = false;
+        // The playlist played everything it had before the next clip arrived.
+        let drained = false;
+        let unspokenRest: ReadItem | null = null;
+        let startWatchdog: ReturnType<typeof setTimeout> | undefined;
+
+        const finishBlock = () => {
+          clearTimeout(startWatchdog);
+          const rest = unspokenRest;
+          releasePlaylist();
+          if (rest === null) {
+            finishCurrentAnswerBlock();
+            return;
+          }
+          void (async () => {
+            if (await speakWithNativeFallback(rest, isCurrent)) return;
+            announceExhausted("The server stopped answering partway through this reply.");
+          })();
+        };
+
+        try {
+          setTimeline({
+            tracks: texts.map((text) => ({ seconds: estimateSpeechSeconds(text), exact: false })),
+            pendingSeconds: 0,
+          });
+          const clipUris = mapWithConcurrency(texts, SYNTHESIS_CONCURRENCY, async (text, index) => {
+            if (!isLive()) throw new Error("Superseded.");
+            const uri = item.clipUri ?? (await synthesizeChunk(text));
+            if (!item.clipUri) activeSegmentUris.add(uri);
+            if (!isLive()) throw new Error("Superseded.");
+            const seconds = await readClipSeconds(uri);
+            if (seconds !== null && isLive()) setTimelineTrack(index, seconds);
+            return uri;
+          });
+          // Later clips may fail after this block stopped waiting for them.
+          for (const clip of clipUris) clip.catch(() => undefined);
+
+          for (let index = 0; index < clipUris.length; index += 1) {
+            let uri: string;
+            try {
+              uri = await clipUris[index]!;
+            } catch (error) {
+              if (!isLive()) return;
+              log("playlist: clip failed", index, error);
+              const rest: ReadItem = {
+                ...item,
+                clipUri: undefined,
+                text: texts.slice(index).join(" "),
+              };
+              if (pl === null) {
+                setTimeline(null);
+                if (await speakWithNativeFallback(rest, isCurrent)) return;
+                announceExhausted(
+                  error instanceof Error && error.message.length > 0
+                    ? error.message
+                    : "The server did not answer. Check the connection and try again.",
+                );
+                return;
+              }
+              unspokenRest = rest;
+              if (timeline !== null) {
+                setTimeline({ ...timeline, tracks: timeline.tracks.slice(0, index) });
+              }
+              break;
+            }
+            if (!isLive()) return;
+
+            if (pl !== null) {
+              pl.add({ uri });
+              if (drained) {
+                drained = false;
+                pl.skipTo(index);
+                if (!isUserPausedState && !isVoiceRecordingActive) pl.play();
+              }
+              continue;
+            }
+
+            const created = createAudioPlaylist({ sources: [{ uri }] });
+            pl = created;
+            playlist = created;
+            if (T3NativeControls?.pauseWaitingAudio) {
+              try {
+                void T3NativeControls.pauseWaitingAudio();
+              } catch {}
+            }
+            log(
+              "playlist: created",
+              item.clipUri ? "device clip" : `server clip 1/${texts.length}`,
+              `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
+              uri,
+            );
+            try {
+              created.setActiveForLockScreen(
+                true,
+                {
+                  title: item.title ?? "Antwort",
+                  artist: item.projectTitle ? `T3 Code · ${item.projectTitle}` : "T3 Code",
+                },
+                READ_ALOUD_LOCK_SCREEN_OPTIONS,
+              );
+            } catch {}
+
+            startWatchdog = setTimeout(() => {
+              if (started || !isLive()) return;
+              abandoned = true;
+              releasePlaylist();
+              void (async () => {
+                if (await speakWithNativeFallback(item, isCurrent)) return;
+                announceExhausted("The reply clip did not start playing.");
+              })();
+            }, START_WATCHDOG_MS);
+
+            playlistSubscription = created.addListener("playlistStatusUpdate", (status) => {
+              if (!isLive()) return;
+              publishProgress();
+              if (!started && status.isLoaded) {
+                if (isVoiceRecordingActive) {
+                  log("playServerBlock: voice recording active, holding loaded clip");
+                  setSpeech({ ...currentSpeech, phase: "paused" });
+                  pausedByVoiceInput = "speech";
+                } else {
+                  created.play();
+                }
+              }
+              if (status.playing && !started) {
+                started = true;
+                clearTimeout(startWatchdog);
+                log(
+                  "playlist: PLAYING",
+                  `${Date.now() - (speakStartedAt || Date.now())}ms after speak`,
+                  "queued:",
+                  answerBlockQueue.length,
+                );
+                setSpeech({ ...currentSpeech, phase: "playing" });
+              }
+              if (started && !status.didJustFinish) {
+                if (!status.playing && currentSpeech.phase === "playing") {
+                  log("playlistStatusUpdate (server): remote paused");
+                  setSpeech({ ...currentSpeech, phase: "paused" });
+                } else if (
+                  status.playing &&
+                  (currentSpeech.phase === "paused" || currentSpeech.phase === "loading")
+                ) {
+                  setSpeech({ ...currentSpeech, phase: "playing" });
+                }
+              }
+              // expo-audio reports didJustFinish only after the last queued track.
+              if (status.didJustFinish) {
+                if (allAdded) {
+                  log("playlist: finished reply, queued blocks:", answerBlockQueue.length);
+                  finishBlock();
+                } else {
+                  log("playlist: drained, waiting for the next clip");
+                  drained = true;
+                  setSpeech({ ...currentSpeech, phase: "loading" });
+                }
+              }
+            });
+
+            setSpeech({
+              key: item.key,
+              threadId: item.threadId ?? currentSpeech.threadId,
+              environmentId: item.environmentId ?? currentSpeech.environmentId,
+              title: item.title ?? currentSpeech.title,
+              projectTitle: item.projectTitle ?? currentSpeech.projectTitle,
+              phase: "loading",
+              source: item.source,
+              queued: answerBlockQueue.length,
+            });
+            if (!isVoiceRecordingActive) created.play();
+          }
+
+          allAdded = true;
+          if (drained) finishBlock();
+        } catch (error) {
+          if (!isLive()) return;
+          log("playlist: failed", error);
+          clearTimeout(startWatchdog);
+          releasePlaylist();
+          if (await speakWithNativeFallback(item, isCurrent)) return;
+          announceExhausted(
+            error instanceof Error && error.message.length > 0
+              ? error.message
+              : "The server did not answer. Check the connection and try again.",
+          );
+        }
+      })();
     },
-    [deviceTtsConfig, httpBaseUrl, playClip, speakWithNativeFallback],
+    [environmentId, httpBaseUrl, speakWithNativeFallback, ttsSynthesize],
   );
 
   const speak = useCallback(
@@ -1772,6 +2026,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
     (item: {
       readonly key: string;
       readonly text: string;
+      readonly turnParts?: ReadonlyArray<TurnPart>;
       readonly clipUri?: string;
       readonly threadId?: string;
       readonly environmentId?: EnvironmentId;
@@ -1851,35 +2106,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
     }
   }, []);
 
-  const seekBy = useCallback((deltaSeconds: number) => {
-    if (playlist) {
-      try {
-        const pl = playlist as unknown as {
-          currentTime?: number;
-          currentIndex?: number;
-          trackCount?: number;
-          currentStatus?: { currentTime?: number; currentIndex?: number };
-          seekTo?: (seconds: number) => Promise<void>;
-          skipTo?: (index: number) => void;
-          previous?: () => void;
-        };
-        const current = pl.currentTime ?? pl.currentStatus?.currentTime ?? 0;
-        const target = current + deltaSeconds;
-        if (target < 0) {
-          const currentIndex = pl.currentIndex ?? pl.currentStatus?.currentIndex ?? 0;
-          if (currentIndex > 0) {
-            pl.skipTo?.(currentIndex - 1);
-          } else {
-            void pl.seekTo?.(0);
-          }
-        } else {
-          void pl.seekTo?.(target);
-        }
-      } catch (e) {
-        log("seekBy: failed", e);
-      }
-    }
-  }, []);
+  const seekBy = useCallback((deltaSeconds: number) => seekReadAloudBy(deltaSeconds), []);
 
   const stop = useCallback(() => {
     stopCurrent();
@@ -1890,7 +2117,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
       if (deviceTtsConfig && !item.clipUri) {
         consumeDeviceStream(item, isCurrent);
       } else {
-        playServerOrClipBlock(item, isCurrent);
+        playServerBlock(item, isCurrent);
       }
     };
     playThroughCurrentDeps = (item: ReadItem) => {
@@ -1899,12 +2126,22 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
       if (deviceTtsConfig && !item.clipUri) {
         consumeDeviceStream(item, isCurrent);
       } else {
-        playServerOrClipBlock(item, isCurrent);
+        playServerBlock(item, isCurrent);
       }
     };
-  }, [consumeDeviceStream, deviceTtsConfig, playServerOrClipBlock]);
+  }, [consumeDeviceStream, deviceTtsConfig, playServerBlock]);
 
-  return { speech, speak, pause, resume, seekBy, stop, enqueue, skipNext: skipToNextBlock };
+  return {
+    speech,
+    speak,
+    pause,
+    resume,
+    seekBy,
+    stop,
+    enqueue,
+    skipNext: skipToNextAnswer,
+    skipPrevious: skipToPreviousAnswer,
+  };
 }
 
 function isMessageEntry(entry: unknown): entry is ThreadFeedMessageEntry {
@@ -1929,9 +2166,9 @@ export function useReadAloudAutoAnnounce(input: {
   readonly threadTitle?: string;
   readonly projectTitle?: string;
   readonly feed?: ReadonlyArray<unknown>;
-  readonly turnTexts?: ReadonlyMap<string, string>;
+  readonly turnParts?: ReadonlyMap<string, ReadonlyArray<TurnPart>>;
 }) {
-  const { environmentId, threadId, threadTitle, projectTitle, feed, turnTexts } = input;
+  const { environmentId, threadId, threadTitle, projectTitle, feed, turnParts } = input;
   const { enqueue, speak } = useReadAloud(environmentId);
   const preferencesResult = useAtomValue(mobilePreferencesAtom);
   const autoRead =
@@ -1990,34 +2227,34 @@ export function useReadAloudAutoAnnounce(input: {
       newlyFinished.push({ key: message.id, text: message.text });
     }
 
-    if (newlyFinished.length > 0) {
+    // Only the newest reply is read; its turn parts carry the earlier messages
+    // of its turn, and replies from earlier turns arriving in the same update
+    // (reconnect, catch-up) would otherwise play first.
+    const newest = newlyFinished.at(-1);
+    if (newest !== undefined) {
       if (isAudioSessionActive || isReadAloudArmedOnNextReply(threadId)) {
         const armed = armedTargets.get(threadId);
         if (!isAudioSessionActive) {
           disarmReadAloudOnNextReply(threadId);
         }
-        for (const item of newlyFinished) {
-          const textToSpeak = turnTexts?.get(item.key) ?? item.text;
-          const resolvedProject = armed?.projectTitle ?? projectTitle;
-          enqueue({
-            key: item.key,
-            text: textToSpeak,
-            threadId,
-            environmentId,
-            title: armed?.threadTitle ?? threadTitle,
-            projectTitle: resolvedProject,
-          });
-        }
+        enqueue({
+          key: newest.key,
+          text: newest.text,
+          turnParts: turnParts?.get(newest.key),
+          threadId,
+          environmentId,
+          title: armed?.threadTitle ?? threadTitle,
+          projectTitle: armed?.projectTitle ?? projectTitle,
+        });
       } else if (autoRead) {
-        for (const item of newlyFinished) {
-          enqueue({
-            ...item,
-            threadId,
-            environmentId,
-            title: threadTitle,
-            projectTitle,
-          });
-        }
+        enqueue({
+          ...newest,
+          turnParts: turnParts?.get(newest.key),
+          threadId,
+          environmentId,
+          title: threadTitle,
+          projectTitle,
+        });
       }
     }
   }, [
@@ -2029,6 +2266,6 @@ export function useReadAloudAutoAnnounce(input: {
     threadId,
     threadTitle,
     projectTitle,
-    turnTexts,
+    turnParts,
   ]);
 }

@@ -198,6 +198,7 @@ import {
   isContextCompactionActivityGroup,
   isContextHandoffActivityGroup,
   isSecretRequestActivityGroup,
+  gatherTurnParts,
   gatherTurnTexts,
   type ThreadFeedEntry,
   type ThreadFeedLatestRun,
@@ -2094,13 +2095,14 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const viewportWidth =
     settledPaneWidth !== null ? Math.round(settledPaneWidth) : measuredViewportWidth;
   const turnTextByMessageId = useMemo(() => gatherTurnTexts(props.feed), [props.feed]);
+  const turnPartsByMessageId = useMemo(() => gatherTurnParts(props.feed), [props.feed]);
   useReadAloudAutoAnnounce({
     environmentId: props.environmentId,
     threadId: props.threadId,
     threadTitle: props.threadTitle,
     projectTitle: props.projectTitle,
     feed: props.feed,
-    turnTexts: turnTextByMessageId,
+    turnParts: turnPartsByMessageId,
   });
   const [viewportHeight, setViewportHeight] = useState(0);
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);

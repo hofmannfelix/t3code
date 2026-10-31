@@ -17,6 +17,9 @@ const harness = vi.hoisted(() => {
     readonly sources: Array<{ uri: string }>;
     readonly uri: string;
     currentTime: number;
+    currentIndex: number;
+    readonly trackCount: number;
+    readonly skipTo: ReturnType<typeof vi.fn>;
     readonly play: ReturnType<typeof vi.fn>;
     readonly pause: ReturnType<typeof vi.fn>;
     readonly seekTo: ReturnType<typeof vi.fn>;
@@ -45,9 +48,17 @@ const harness = vi.hoisted(() => {
     const pl = {
       sources: [...config.sources],
       currentTime: 0,
+      currentIndex: 0,
+      get trackCount() {
+        return pl.sources.length;
+      },
       get uri() {
         return pl.sources[0]?.uri ?? "";
       },
+      skipTo: vi.fn((index: number) => {
+        pl.currentIndex = index;
+        pl.currentTime = 0;
+      }),
       add: vi.fn((source: { uri: string }) => {
         pl.sources.push(source);
       }),
@@ -252,6 +263,8 @@ function renderReadAloud() {
     seekBy: () => current.seekBy,
     stop: () => current.stop,
     enqueue: () => current.enqueue,
+    skipNext: () => current.skipNext,
+    skipPrevious: () => current.skipPrevious,
   };
 }
 
@@ -297,46 +310,218 @@ describe("useReadAloud", () => {
     vi.useRealTimers();
   });
 
-  it("plays the lead sentence, then hands over to the queued rest", async () => {
+  it("synthesizes every chunk up front and plays the reply as one playlist", async () => {
     const view = renderReadAloud();
     await act(async () => {
       view.speak()({ key: "msg-1", text: "One. Two. Three." });
     });
     await flush();
 
-    // The lead chunk starts synthesis and playback; the queue waits for it
-    // instead of doubling up while the lead loads.
-    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(1);
-    expect(normalize(spokenTexts()[0]!)).toBe("Thread T3 Code: One.");
+    // The short lead and the rest are requested together, not one after another.
+    expect(spokenTexts().map(normalize)).toEqual(["Thread T3 Code: One.", "Two. Three."]);
     expect(harness.players).toHaveLength(1);
     expect(harness.downloads[0]!.url).toBe("http://server.test:8923/api/tts-audio/token-1");
-    expect(harness.players[0]!.uri).toBe("file:///cache/download-1.wav");
+    const pl = harness.players[0]!;
+    expect(pl.sources.map((source) => source.uri)).toEqual([
+      "file:///cache/download-1.wav",
+      "file:///cache/download-2.wav",
+    ]);
     expect(view.speech()).toMatchObject({ key: "msg-1", phase: "loading" });
 
-    // Remote clips need preparation before play() takes effect.
-    harness.players[0]!.emit({ isLoaded: true });
-    expect(harness.players[0]!.play).toHaveBeenCalled();
+    pl.emit({ isLoaded: true });
+    expect(pl.play).toHaveBeenCalled();
 
     act(() => {
-      harness.players[0]!.emit({ playing: true });
+      pl.emit({ playing: true });
     });
     expect(view.speech()).toMatchObject({ key: "msg-1", phase: "playing" });
 
     act(() => {
-      harness.players[0]!.emit({ didJustFinish: true });
+      pl.emit({ didJustFinish: true });
     });
     await flush();
-    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(2);
-    expect(normalize(spokenTexts()[1]!)).toBe("Two. Three.");
-    expect(harness.players).toHaveLength(2);
+    expect(harness.players).toHaveLength(1);
+    expect(view.speech()).toMatchObject({ key: null, phase: null, queued: 0 });
+    expect(pl.release).toHaveBeenCalled();
+  });
+
+  it("waits on the next clip when playback outruns synthesis, then continues", async () => {
+    const synthesizeNow = harness.ttsSynthesize.getMockImplementation()!;
+    let releaseRest!: () => void;
+    harness.ttsSynthesize.mockImplementationOnce(synthesizeNow).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseRest = () =>
+            resolve({
+              _tag: "Success",
+              value: { relativeUrl: "/api/tts-audio/token-2", expiresAt: 0 },
+            });
+        }),
+    );
+    const view = renderReadAloud();
+    await act(async () => {
+      view.speak()({ key: "msg-slow", text: "Lead. Slow rest." });
+    });
+    await flush();
+    const pl = harness.players[0]!;
+    act(() => {
+      pl.emit({ isLoaded: true, playing: true });
+    });
+
+    // The lead finished before the rest exists: keep the reply open.
+    act(() => {
+      pl.emit({ playing: false, didJustFinish: true });
+    });
+    await flush();
+    expect(view.speech()).toMatchObject({ key: "msg-slow", phase: "loading" });
+    expect(pl.release).not.toHaveBeenCalled();
+
+    pl.play.mockClear();
+    await act(async () => {
+      releaseRest();
+    });
+    await flush();
+    expect(pl.sources).toHaveLength(2);
+    expect(pl.skipTo).toHaveBeenCalledWith(1);
+    expect(pl.play).toHaveBeenCalled();
 
     act(() => {
-      harness.players[1]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
+      pl.emit({ playing: true, didJustFinish: true });
     });
     await flush();
-    // Queue drained -> back to idle.
-    expect(view.speech()).toMatchObject({ key: null, phase: null, queued: 0 });
-    expect(harness.players[1]!.release).toHaveBeenCalled();
+    expect(view.speech()).toMatchObject({ key: null, phase: null });
+  });
+
+  it("skips to the next answer, and back to the previous one with the skipped answer after it", async () => {
+    const view = renderReadAloud();
+    await act(async () => {
+      view.enqueue()({ key: "msg-skip-a", text: "Antwort A.", threadId: "thread-a" });
+      view.enqueue()({ key: "msg-skip-b", text: "Antwort B.", threadId: "thread-b" });
+    });
+    await flush();
+    act(() => {
+      harness.players[0]!.emit({ isLoaded: true, playing: true });
+    });
+    expect(view.speech()).toMatchObject({ key: "msg-skip-a", queued: 1 });
+
+    await act(async () => {
+      view.skipNext()();
+    });
+    await flush();
+    expect(harness.players[0]!.release).toHaveBeenCalled();
+    expect(view.speech()).toMatchObject({ key: "msg-skip-b", queued: 0 });
+
+    // At the start of B, back replays A and keeps B queued right after it.
+    await act(async () => {
+      view.skipPrevious()();
+    });
+    await flush();
+    expect(view.speech()).toMatchObject({ key: "msg-skip-a", queued: 1 });
+    expect(normalize(spokenTexts().at(-1)!)).toBe("Thread T3 Code: Antwort A.");
+
+    act(() => {
+      harness.players.at(-1)!.emit({ isLoaded: true, playing: true, didJustFinish: true });
+    });
+    await flush();
+    expect(view.speech()).toMatchObject({ key: "msg-skip-b", queued: 0 });
+
+    act(() => {
+      view.stop()();
+    });
+  });
+
+  it("restarts the current answer when going back a few seconds into it", async () => {
+    const view = renderReadAloud();
+    await act(async () => {
+      view.speak()({
+        key: "msg-restart",
+        text: "Eine etwas längere Antwort, damit die geschätzte Dauer reicht.",
+      });
+    });
+    await flush();
+    const pl = harness.players[0]!;
+    act(() => {
+      pl.emit({ isLoaded: true, playing: true, currentTime: 3.5 });
+    });
+
+    act(() => {
+      view.skipPrevious()();
+    });
+    expect(pl.seekTo).toHaveBeenLastCalledWith(0);
+    expect(pl.release).not.toHaveBeenCalled();
+    expect(view.speech()).toMatchObject({ key: "msg-restart" });
+
+    act(() => {
+      view.stop()();
+    });
+  });
+
+  it("reads only the unspoken rest of a turn after a partial answer was read", async () => {
+    const view = renderReadAloud();
+    const partOne = { key: "msg-part-1", text: "Ich prüfe das kurz." };
+    const partTwo = { key: "msg-part-2", text: "Alles erledigt." };
+    await act(async () => {
+      view.enqueue()({ ...partOne, threadId: "thread-parts", turnParts: [partOne] });
+    });
+    await flush();
+    act(() => {
+      harness.players.at(-1)!.emit({ isLoaded: true, playing: true, didJustFinish: true });
+    });
+    await flush();
+
+    await act(async () => {
+      view.enqueue()({ ...partTwo, threadId: "thread-parts", turnParts: [partOne, partTwo] });
+    });
+    await flush();
+    expect(normalize(spokenTexts().at(-1)!)).toBe("Thread T3 Code: Alles erledigt.");
+
+    act(() => {
+      view.stop()();
+    });
+  });
+
+  it("reads the whole turn when no part of it was spoken yet", async () => {
+    const view = renderReadAloud();
+    const partOne = { key: "msg-whole-1", text: "Erster Teil." };
+    const partTwo = { key: "msg-whole-2", text: "Zweiter Teil." };
+    await act(async () => {
+      view.enqueue()({ ...partTwo, threadId: "thread-whole", turnParts: [partOne, partTwo] });
+    });
+    await flush();
+    expect(spokenTexts().map(normalize).join(" ")).toContain("Erster Teil. Zweiter Teil.");
+
+    act(() => {
+      view.stop()();
+    });
+  });
+
+  it("seeks across chunk boundaries as one continuous track", async () => {
+    const view = renderReadAloud();
+    // Estimated chunk lengths: "Thread T3 Code: Eins." ≈ 1.4s, the rest ≈ 2.3s.
+    await act(async () => {
+      view.speak()({ key: "msg-seek", text: "Eins. Zwei Drei Vier. Fünf." });
+    });
+    await flush();
+    const pl = harness.players[0]!;
+    act(() => {
+      pl.emit({ isLoaded: true, playing: true, currentTime: 1 });
+    });
+
+    act(() => {
+      view.seekBy()(1);
+    });
+    expect(pl.skipTo).toHaveBeenCalledWith(1);
+    expect(pl.seekTo).toHaveBeenLastCalledWith(expect.closeTo(2 - 21 / 14.5, 5));
+
+    act(() => {
+      view.seekBy()(-10);
+    });
+    expect(pl.skipTo).toHaveBeenLastCalledWith(0);
+    expect(pl.seekTo).toHaveBeenLastCalledWith(0);
+
+    act(() => {
+      view.stop()();
+    });
   });
 
   it("fails visibly with an alert when synthesis never answers", async () => {
@@ -540,9 +725,8 @@ describe("useReadAloud", () => {
     });
     await flush();
 
-    // Lead chunk of Thread A synthesizes and loads
-    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(1);
-    expect(normalize(spokenTexts()[0]!)).toBe("Thread T3 Code: Sentence A1.");
+    // Both chunks of Thread A synthesize into one playlist
+    expect(spokenTexts().map(normalize)).toEqual(["Thread T3 Code: Sentence A1.", "Sentence A2."]);
     expect(view.speech()).toMatchObject({ key: "msg-thread-a", phase: "loading", queued: 0 });
 
     harness.players[0]!.emit({ isLoaded: true });
@@ -561,44 +745,26 @@ describe("useReadAloud", () => {
     });
     await flush();
 
-    // Thread B is queued as a full answer block (queued = 1), NOT mixed into Thread A
+    // Thread B is queued as a full answer block, NOT synthesized into Thread A
     expect(view.speech()).toMatchObject({ key: "msg-thread-a", phase: "playing", queued: 1 });
-    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(1);
+    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(2);
 
-    // 3. Thread A finishes chunk 1 -> Thread A continues with chunk 2
+    // 3. Thread A's playlist ends -> Thread B starts as the next full block
     act(() => {
       harness.players[0]!.emit({ didJustFinish: true });
     });
     await flush();
 
-    // Second chunk of Thread A synthesizes next (NOT Thread B!)
-    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(2);
-    expect(normalize(spokenTexts()[1]!)).toBe("Sentence A2.");
-    expect(view.speech()).toMatchObject({ key: "msg-thread-a", queued: 1 });
-
-    // 4. Thread A finishes chunk 2 -> Thread A complete!
-    act(() => {
-      harness.players[1]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
-    });
-    await flush();
-
-    // 5. Thread B starts from the FIFO queue as the next full answer block
-    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(3);
-    expect(normalize(spokenTexts()[2]!)).toBe("Thread T3 Code: Sentence B1.");
+    expect(spokenTexts().slice(2).map(normalize)).toEqual([
+      "Thread T3 Code: Sentence B1.",
+      "Sentence B2.",
+    ]);
+    expect(harness.players).toHaveLength(2);
     expect(view.speech()).toMatchObject({ key: "msg-thread-b", queued: 0 });
 
-    // 6. Thread B finishes chunk 1 -> Thread B plays chunk 2
+    // 4. Thread B's playlist ends -> queue drained, back to idle
     act(() => {
-      harness.players[2]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
-    });
-    await flush();
-
-    expect(harness.ttsSynthesize).toHaveBeenCalledTimes(4);
-    expect(normalize(spokenTexts()[3]!)).toBe("Sentence B2.");
-
-    // 7. Thread B finishes chunk 2 -> Queue drained completely, returns to idle
-    act(() => {
-      harness.players[3]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
+      harness.players[1]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
     });
     await flush();
 
@@ -609,7 +775,7 @@ describe("useReadAloud", () => {
 function renderAutoAnnounce(initialProps: {
   threadId: string;
   feed?: ReadonlyArray<unknown>;
-  turnTexts?: ReadonlyMap<string, string>;
+  turnParts?: ReadonlyMap<string, ReadonlyArray<{ key: string; text: string }>>;
 }) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -620,13 +786,13 @@ function renderAutoAnnounce(initialProps: {
   function Probe(p: {
     threadId: string;
     feed?: ReadonlyArray<unknown>;
-    turnTexts?: ReadonlyMap<string, string>;
+    turnParts?: ReadonlyMap<string, ReadonlyArray<{ key: string; text: string }>>;
   }) {
     useReadAloudAutoAnnounce({
       environmentId: "env-1" as EnvironmentId,
       threadId: p.threadId,
       feed: p.feed,
-      turnTexts: p.turnTexts,
+      turnParts: p.turnParts,
     });
     return null;
   }
@@ -639,7 +805,7 @@ function renderAutoAnnounce(initialProps: {
     rerender: (nextProps: {
       threadId: string;
       feed?: ReadonlyArray<unknown>;
-      turnTexts?: ReadonlyMap<string, string>;
+      turnParts?: ReadonlyMap<string, ReadonlyArray<{ key: string; text: string }>>;
     }) => {
       currentProps = nextProps;
       act(() => {
@@ -748,6 +914,36 @@ describe("useReadAloudAutoAnnounce", () => {
     expect(spokenTexts()[0]).toContain("Die Antwort ist fertig.");
   });
 
+  it("reads only the newest reply when several finished replies arrive at once", async () => {
+    const finished = (id: string, text: string) => ({
+      type: "message",
+      message: { id, role: "assistant", streaming: false, text },
+    });
+    const user = (id: string) => ({
+      type: "message",
+      message: { id, role: "user", streaming: false, text: "Next question." },
+    });
+    const harnessView = renderAutoAnnounce({
+      threadId: "thread-1",
+      feed: [finished("msg-history", "History reply.")],
+    });
+    await flush();
+    // A reconnect delivers an earlier turn's reply together with the latest one.
+    harnessView.rerender({
+      threadId: "thread-1",
+      feed: [
+        finished("msg-history", "History reply."),
+        finished("msg-earlier", "Earlier reply."),
+        user("msg-user"),
+        finished("msg-latest", "Latest reply."),
+      ],
+    });
+    await flush();
+
+    expect(spokenTexts().join(" ")).toContain("Latest reply.");
+    expect(spokenTexts().join(" ")).not.toContain("Earlier reply.");
+  });
+
   it("silences old messages when switching to a different thread", async () => {
     const harnessView = renderAutoAnnounce({
       threadId: "thread-1",
@@ -785,7 +981,12 @@ describe("useReadAloudAutoAnnounce", () => {
     const harnessView = renderAutoAnnounce({
       threadId: "thread-arm-test",
       feed: [],
-      turnTexts: new Map([["msg-armed-reply", "Vollständiger Turn Text zum Vorlesen."]]),
+      turnParts: new Map([
+        [
+          "msg-armed-reply",
+          [{ key: "msg-armed-reply", text: "Vollständiger Turn Text zum Vorlesen." }],
+        ],
+      ]),
     });
     await flush();
 
@@ -807,7 +1008,12 @@ describe("useReadAloudAutoAnnounce", () => {
           },
         },
       ],
-      turnTexts: new Map([["msg-armed-reply", "Vollständiger Turn Text zum Vorlesen."]]),
+      turnParts: new Map([
+        [
+          "msg-armed-reply",
+          [{ key: "msg-armed-reply", text: "Vollständiger Turn Text zum Vorlesen." }],
+        ],
+      ]),
     });
     await flush();
     expect(harness.ttsSynthesize).not.toHaveBeenCalled();
@@ -826,7 +1032,12 @@ describe("useReadAloudAutoAnnounce", () => {
           },
         },
       ],
-      turnTexts: new Map([["msg-armed-reply", "Vollständiger Turn Text zum Vorlesen."]]),
+      turnParts: new Map([
+        [
+          "msg-armed-reply",
+          [{ key: "msg-armed-reply", text: "Vollständiger Turn Text zum Vorlesen." }],
+        ],
+      ]),
     });
     await flush();
 
@@ -1143,6 +1354,43 @@ describe("useReadAloudAutoAnnounce", () => {
     });
     expect(sessionActive).toBe(false);
     expect(isGlobalAudioSessionActive()).toBe(false);
+  });
+
+  it("starts a reply right away while no answer plays, even with the waiting audio paused", async () => {
+    await act(async () => {
+      await startGlobalAudioSession({ threadId: "thread-waiting" });
+    });
+    const view = renderReadAloud();
+    act(() => {
+      view.pause()();
+    });
+    expect(view.speech().phase).toBe("paused");
+
+    await act(async () => {
+      view.enqueue()({ key: "msg-old", text: "Old reply.", threadId: "thread-waiting" });
+    });
+    await flush();
+    expect(view.speech()).toMatchObject({ key: "msg-old", queued: 0 });
+
+    act(() => {
+      harness.players[0]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
+    });
+    await flush();
+    await act(async () => {
+      view.enqueue()({ key: "msg-new", text: "New reply.", threadId: "thread-waiting" });
+    });
+    await flush();
+    act(() => {
+      harness.players.at(-1)!.emit({ isLoaded: true, playing: true, didJustFinish: true });
+    });
+    await flush();
+
+    // The old reply must not come back after the new one.
+    expect(view.speech()).toMatchObject({ key: null, queued: 0 });
+    expect(harness.players).toHaveLength(2);
+    act(() => {
+      stopGlobalAudioSession();
+    });
   });
 
   it("pauses speech during voice recording and resumes it afterwards", async () => {

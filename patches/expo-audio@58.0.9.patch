@@ -23,3 +23,46 @@ index 198fe6d..5b39611 100644
        "url": recorder.url.absoluteString
      ])
    }
+diff --git a/ios/MediaController.swift b/ios/MediaController.swift
+--- a/ios/MediaController.swift
++++ b/ios/MediaController.swift
+@@ -329,36 +329,12 @@
+     }
+     remoteCommandTargets.append((remoteCommandCenter.changePlaybackPositionCommand, changePlaybackPositionTarget))
+ 
++    // T3 Code: skip intervals are handled by T3NativeControls, which forwards them to JS
++    // so a read-aloud reply seeks as one track across playlist items. A second target
++    // here would seek the current item as well and double every skip.
+     remoteCommandCenter.skipForwardCommand.preferredIntervals = [10.0]
+-    let skipForwardTarget = remoteCommandCenter.skipForwardCommand.addTarget { [weak self] event in
+-      guard let playable = self?.activePlayable,
+-      let event = event as? MPSkipIntervalCommandEvent else {
+-        return .commandFailed
+-      }
+-
+-      let currentTime = playable.lockScreenPlayer.currentTime()
+-      let seekTime = currentTime + CMTime(seconds: event.interval, preferredTimescale: 1)
+-      playable.lockScreenPlayer.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
+-
+-      return .success
+-    }
+-    remoteCommandTargets.append((remoteCommandCenter.skipForwardCommand, skipForwardTarget))
+-
+     remoteCommandCenter.skipBackwardCommand.preferredIntervals = [10.0]
+-    let skipBackwardTarget = remoteCommandCenter.skipBackwardCommand.addTarget { [weak self] event in
+-      guard let playable = self?.activePlayable,
+-      let event = event as? MPSkipIntervalCommandEvent else {
+-        return .commandFailed
+-      }
+ 
+-      let currentTime = playable.lockScreenPlayer.currentTime()
+-      let seekTime = currentTime - CMTime(seconds: event.interval, preferredTimescale: 1)
+-      playable.lockScreenPlayer.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
+-
+-      return .success
+-    }
+-    remoteCommandTargets.append((remoteCommandCenter.skipBackwardCommand, skipBackwardTarget))
+-
+     let nextTrackTarget = remoteCommandCenter.nextTrackCommand.addTarget { [weak self] _ in
+       guard let playable = self?.activePlayable,
+             playable.supportsNextTrack else {
