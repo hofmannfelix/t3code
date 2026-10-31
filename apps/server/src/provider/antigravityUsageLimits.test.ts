@@ -4,9 +4,11 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 
-import { makeAntigravityUsageProbe } from "./antigravityUsageLimits.ts";
+import { cliWindows, makeAntigravityUsageProbe } from "./antigravityUsageLimits.ts";
 
 const summary = {
   groups: [
@@ -47,6 +49,68 @@ const summary = {
   ],
 };
 
+const sampleCliOutput = JSON.stringify({
+  status: "SUCCESS",
+  command: {
+    name: "usage",
+    data: {
+      description: "Model quota groups",
+      groups: [
+        {
+          name: "Gemini Models",
+          buckets: [
+            {
+              id: "gemini-weekly",
+              name: "Weekly Limit Remaining",
+              window: "weekly",
+              remaining_fraction: 0.5169,
+              reset_time: "2026-10-31T07:43:56Z",
+            },
+            {
+              id: "gemini-5h",
+              name: "Five Hour Limit Remaining",
+              window: "5h",
+              remaining_fraction: 0.9594,
+              reset_time: "2026-10-26T16:03:28Z",
+            },
+          ],
+        },
+        {
+          name: "Claude and GPT models",
+          buckets: [
+            {
+              id: "3p-weekly",
+              name: "Weekly Limit Remaining",
+              window: "weekly",
+              remaining_fraction: 1,
+              reset_time: "2026-11-02T12:06:04Z",
+            },
+            {
+              id: "3p-5h",
+              name: "Five Hour Limit Remaining",
+              window: "5h",
+              remaining_fraction: 0.8,
+              reset_time: "2026-10-26T17:06:04Z",
+            },
+          ],
+        },
+        {
+          name: "Gemini 4 Argon",
+          buckets: [
+            {
+              id: "gemini-argon-wtu-weekly",
+              name: "Gemini 4 Argon Weekly Limit",
+              window: "weekly",
+              remaining_fraction: 0,
+              reset_time: "2026-11-02T08:29:56Z",
+            },
+          ],
+        },
+      ],
+    },
+  },
+});
+
 const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
   options: {
     summary?: unknown;
@@ -61,6 +125,9 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
     userId?: string;
     missingToken?: boolean;
     authMethod?: "oauth-personal" | "gemini-api-key";
+    enableCli?: boolean;
+    cliStdout?: string;
+    cliExitCode?: number;
   } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
@@ -117,10 +184,34 @@ const fixture = Effect.fn("AntigravityUsageTest.fixture")(function* (
       );
     }),
   );
+
+  let binaryPath: string | undefined;
+  if (options.enableCli) {
+    binaryPath = path.join(profileDirectory, "mock-agy");
+    yield* fs.writeFileString(binaryPath, "#!/bin/sh\n");
+    yield* fs.chmod(binaryPath, 0o755);
+  }
+  const mockSpawner = ChildProcessSpawner.make(() =>
+    Effect.sync(() =>
+      ChildProcessSpawner.makeHandle({
+        stdout: Stream.make(new TextEncoder().encode(options.cliStdout ?? "")),
+        stderr: Stream.empty,
+        exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(options.cliExitCode ?? 0)),
+        pid: ChildProcessSpawner.ProcessId(9999),
+        kill: () => Effect.void,
+      }),
+    ),
+  );
+
   const usage = yield* makeAntigravityUsageProbe({
     profileDirectory,
     authMethod: options.authMethod ?? "oauth-personal",
-  }).pipe(Effect.provideService(HttpClient.HttpClient, http));
+    ...(binaryPath !== undefined ? { binaryPath } : {}),
+    ...(options.enableCli !== undefined ? { enableCli: options.enableCli } : {}),
+  }).pipe(
+    Effect.provideService(HttpClient.HttpClient, http),
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, mockSpawner),
+  );
   return { ...usage, requests, writeToken, tokenPath };
 });
 
@@ -261,6 +352,41 @@ describe("Antigravity subscription limits", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("merges model quotas when retrieveUserQuotaSummary only returns 3P quotas", () =>
+    Effect.gen(function* () {
+      const { probe } = yield* fixture({
+        summary: {
+          groups: [
+            {
+              displayName: "Claude and GPT models",
+              buckets: [
+                { bucketId: "3p-weekly", window: "weekly", remainingFraction: 0.5 },
+                { bucketId: "3p-5h", window: "5h", remainingFraction: 0.7 },
+              ],
+            },
+          ],
+        },
+        models: {
+          models: {
+            "gemini-2.5-pro": {
+              modelProvider: "MODEL_PROVIDER_GOOGLE",
+              quotaInfo: { remainingFraction: 0.85, resetTime: "2026-10-26T18:00:00Z" },
+            },
+          },
+        },
+      });
+      const limits = yield* probe;
+      expect(limits.windows.map((w) => w.id).toSorted()).toEqual([
+        "3p-5h",
+        "3p-weekly",
+        "gemini-quota",
+      ]);
+      const geminiWindow = limits.windows.find((w) => w.id === "gemini-quota");
+      expect(geminiWindow?.label).toBe("Gemini · Reported quota");
+      expect(geminiWindow?.usedPercent).toBeCloseTo(15);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("skips disabled and missing fractions and clamps valid percentages", () =>
     Effect.gen(function* () {
       const { probe } = yield* fixture({
@@ -301,6 +427,89 @@ describe("Antigravity subscription limits", () => {
         expect((yield* probe).unavailable?.reason).toBe("unsupported");
         expect(requests).toEqual([]);
       }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it("maps CLI usage output buckets to provider windows", () => {
+    const raw = JSON.parse(sampleCliOutput).command.data;
+    const windows = cliWindows(raw);
+    expect(windows).toHaveLength(5);
+    const byId = new Map(windows.map((w) => [w.id, w]));
+
+    expect(byId.get("gemini-weekly")).toMatchObject({
+      label: "Gemini · Weekly",
+      kind: "weekly",
+      windowDurationMins: 10080,
+      resetsAt: "2026-10-31T07:43:56.000Z",
+    });
+    expect(byId.get("gemini-weekly")?.usedPercent).toBeCloseTo(48.31);
+
+    expect(byId.get("gemini-5h")).toMatchObject({
+      label: "Gemini · 5-hour",
+      kind: "session",
+      windowDurationMins: 300,
+      resetsAt: "2026-10-26T16:03:28.000Z",
+    });
+    expect(byId.get("gemini-5h")?.usedPercent).toBeCloseTo(4.06);
+
+    expect(byId.get("3p-weekly")).toMatchObject({
+      label: "Claude & GPT (shared) · Weekly",
+      kind: "weekly",
+      windowDurationMins: 10080,
+      usedPercent: 0,
+    });
+
+    expect(byId.get("3p-5h")).toMatchObject({
+      label: "Claude & GPT (shared) · 5-hour",
+      kind: "session",
+      windowDurationMins: 300,
+    });
+    expect(byId.get("3p-5h")?.usedPercent).toBeCloseTo(20);
+
+    expect(byId.get("gemini-argon-wtu-weekly")).toMatchObject({
+      label: "Gemini 4 Argon · Weekly",
+      kind: "weekly",
+      windowDurationMins: 10080,
+      usedPercent: 100,
+    });
+  });
+
+  it.effect("reads complete usage limits via CLI output when enableCli is true", () =>
+    Effect.gen(function* () {
+      const { probe, requests } = yield* fixture({
+        enableCli: true,
+        cliStdout: sampleCliOutput,
+      });
+      const limits = yield* probe;
+      expect(limits.windows).toHaveLength(5);
+      expect(limits.unavailable).toBeUndefined();
+      expect(limits.credentialFingerprint).toMatch(/^[0-9a-f]{64}$/);
+
+      // Verify windows are ordered: session windows first, then weekly windows
+      expect(limits.windows.map((w) => w.kind)).toEqual([
+        "session",
+        "session",
+        "weekly",
+        "weekly",
+        "weekly",
+      ]);
+
+      // CLI succeeded, so HTTP quota summary was not called
+      expect(requests.filter((r) => r.url.endsWith(":retrieveUserQuotaSummary"))).toHaveLength(0);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("falls back to HTTP endpoints when CLI execution returns an error exit code", () =>
+    Effect.gen(function* () {
+      const { probe, requests } = yield* fixture({
+        enableCli: true,
+        cliExitCode: 1,
+        cliStdout: "error: failed to run agy",
+      });
+      const limits = yield* probe;
+      // Falls back to HTTP fixture default summary
+      expect(limits.windows).toHaveLength(4);
+      expect(requests.filter((r) => r.url.endsWith(":retrieveUserQuotaSummary"))).toHaveLength(2);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

@@ -1,5 +1,6 @@
 import type { AntigravitySettings, ServerProviderUsageWindow } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { resolveCommandPath, resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -7,7 +8,10 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
@@ -64,11 +68,38 @@ const Models = Schema.Struct({
   ),
 });
 
+const CliBucket = Schema.Struct({
+  id: Schema.NonEmptyString,
+  name: Schema.optional(Schema.String),
+  description: Schema.optional(Schema.String),
+  window: Schema.optional(Schema.String),
+  remaining_fraction: Schema.optional(Schema.Number),
+  reset_time: Schema.optional(Schema.String),
+});
+const CliGroup = Schema.Struct({
+  name: Schema.optional(Schema.String),
+  description: Schema.optional(Schema.String),
+  buckets: Schema.optional(Schema.Array(CliBucket)),
+});
+const CliUsageData = Schema.Struct({
+  description: Schema.optional(Schema.String),
+  groups: Schema.optional(Schema.Array(CliGroup)),
+});
+const CliUsageOutput = Schema.Struct({
+  command: Schema.optional(
+    Schema.Struct({
+      name: Schema.optional(Schema.String),
+      data: Schema.optional(CliUsageData),
+    }),
+  ),
+});
+
 const decodeTokenFile = Schema.decodeEffect(Schema.fromJsonString(TokenFile));
 const decodeTokenResponse = Schema.decodeUnknownEffect(TokenResponse);
 const decodeUserInfo = Schema.decodeUnknownEffect(UserInfo);
 const decodeSummary = Schema.decodeUnknownEffect(Summary);
 const decodeModels = Schema.decodeUnknownEffect(Models);
+const decodeCliOutput = Schema.decodeUnknownEffect(Schema.fromJsonString(CliUsageOutput));
 
 function iso(value: string | undefined): string | undefined {
   const parsed = value ? DateTime.make(value) : Option.none();
@@ -96,6 +127,38 @@ function quotaWindow(
   };
 }
 
+export function cliWindows(data: typeof CliUsageData.Type): ServerProviderUsageWindow[] {
+  const windows = new Map<string, ServerProviderUsageWindow>();
+  for (const group of data.groups ?? []) {
+    for (const bucket of group.buckets ?? []) {
+      if (bucket.remaining_fraction === undefined || !Number.isFinite(bucket.remaining_fraction)) {
+        continue;
+      }
+      const family = bucket.id.startsWith("gemini-argon")
+        ? "Gemini 4 Argon"
+        : bucket.id.startsWith("gemini-")
+          ? "Gemini"
+          : bucket.id.startsWith("3p-")
+            ? "Claude & GPT (shared)"
+            : group.name?.trim() || bucket.id;
+      const weekly = bucket.window === "weekly";
+      const session = bucket.window === "5h";
+      const window = quotaWindow(
+        bucket.id,
+        `${family} · ${weekly ? "Weekly" : session ? "5-hour" : bucket.name?.trim() || "Quota"}`,
+        {
+          remainingFraction: bucket.remaining_fraction,
+          resetTime: bucket.reset_time,
+        },
+        weekly ? "weekly" : session ? "session" : "other",
+        weekly ? 7 * 24 * 60 : session ? 5 * 60 : undefined,
+      );
+      if (window) windows.set(window.id, window);
+    }
+  }
+  return [...windows.values()];
+}
+
 function summaryWindows(summary: typeof Summary.Type) {
   const windows = new Map<string, ServerProviderUsageWindow>();
   const groups = summary.groups?.some((group) => group.buckets?.length)
@@ -104,11 +167,13 @@ function summaryWindows(summary: typeof Summary.Type) {
   for (const group of groups ?? []) {
     for (const bucket of group.buckets ?? []) {
       if (bucket.disabled) continue;
-      const family = bucket.bucketId.startsWith("gemini-")
-        ? "Gemini"
-        : bucket.bucketId.startsWith("3p-")
-          ? "Claude & GPT (shared)"
-          : group.displayName?.trim() || bucket.bucketId;
+      const family = bucket.bucketId.startsWith("gemini-argon")
+        ? "Gemini 4 Argon"
+        : bucket.bucketId.startsWith("gemini-")
+          ? "Gemini"
+          : bucket.bucketId.startsWith("3p-")
+            ? "Claude & GPT (shared)"
+            : group.displayName?.trim() || bucket.bucketId;
       const weekly = bucket.window === "weekly";
       const session = bucket.window === "5h";
       const window = quotaWindow(
@@ -157,16 +222,27 @@ function modelWindows(models: typeof Models.Type) {
   return [...windows.values()];
 }
 
-export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(function* (input: {
+export interface AntigravityUsageProbeOptions {
   readonly profileDirectory: string;
   readonly authMethod: AntigravitySettings["authMethod"];
-}) {
+  readonly binaryPath?: string | undefined;
+  readonly environment?: NodeJS.ProcessEnv | undefined;
+  readonly userHome?: string | undefined;
+  readonly enableCli?: boolean | undefined;
+}
+
+export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(function* (
+  input: AntigravityUsageProbeOptions,
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
   const crypto = yield* Crypto.Crypto;
   const platform = yield* HostProcess.Platform;
   const architecture = yield* HostProcess.Architecture;
+  const home = input.userHome ?? (yield* HostProcess.HomeDirectory);
+  const env = input.environment ?? (yield* HostProcess.Environment);
+  const spawnerOption = yield* Effect.serviceOption(ChildProcessSpawner.ChildProcessSpawner);
   const tokenPath = path.join(input.profileDirectory, "antigravity-acp", "acp_token.json");
   let cached:
     | { fingerprint: string; account: string; accessToken: string; expiresAt: number }
@@ -189,14 +265,79 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
       Effect.flatMap((response) => response.json),
       Effect.timeout("10 seconds"),
     );
+
+  const probeCli = Effect.gen(function* () {
+    if (!input.enableCli) return [];
+    if (Option.isNone(spawnerOption)) return [];
+    const spawner = spawnerOption.value;
+
+    let binary: string | null = null;
+    if (input.binaryPath && (yield* fs.exists(input.binaryPath))) {
+      binary = input.binaryPath;
+    }
+    if (!binary) {
+      const candidate = path.join(home, ".local", "bin", platform === "win32" ? "agy.exe" : "agy");
+      if (yield* fs.exists(candidate)) {
+        binary = candidate;
+      }
+    }
+    if (!binary) {
+      binary = yield* resolveCommandPath("agy", { env }).pipe(
+        Effect.provideService(HostProcess.Platform, platform),
+        Effect.provideService(HostProcess.Environment, env),
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, path),
+        Effect.orElseSucceed(() => null),
+      );
+    }
+    if (!binary) return [];
+
+    const spawnCommand = yield* resolveSpawnCommand(
+      binary,
+      ["-p", "/usage", "--output-format", "json"],
+      { env },
+    ).pipe(Effect.provideService(HostProcess.Platform, platform));
+
+    const child = yield* spawner.spawn(
+      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        env,
+        shell: spawnCommand.shell,
+      }),
+    );
+    const [stdout, , exitCode] = yield* Effect.all(
+      [
+        child.stdout.pipe(Stream.decodeText(), Stream.mkString),
+        child.stderr.pipe(Stream.runDrain),
+        child.exitCode,
+      ],
+      { concurrency: "unbounded" },
+    );
+    if (exitCode !== 0) return [];
+    const parsed = yield* decodeCliOutput(stdout).pipe(Effect.orElseSucceed(() => null));
+    if (!parsed?.command?.data) return [];
+    return cliWindows(parsed.command.data);
+  }).pipe(
+    Effect.provideService(FileSystem.FileSystem, fs),
+    Effect.provideService(Path.Path, path),
+    Effect.scoped,
+    Effect.timeout("20 seconds"),
+    Effect.orElseSucceed(() => []),
+  );
+
   const read = Effect.gen(function* () {
     const startedGeneration = generation;
     const checkedAt = DateTime.formatIso(yield* DateTime.now);
     if (input.authMethod !== "oauth-personal" && input.authMethod !== "oauth-business") {
       return makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" });
     }
-    if (!(yield* fs.exists(tokenPath))) {
+    const tokenExists = yield* fs.exists(tokenPath);
+    if (!tokenExists) {
       cached = undefined;
+      // If CLI is available and reports quotas directly, use them even before acp_token is synced.
+      const cliResult = yield* probeCli;
+      if (cliResult.length > 0) {
+        return makeUsageLimits({ checkedAt, windows: cliResult });
+      }
       return makeUnavailableUsageLimits({
         checkedAt,
         reason: "unsupported",
@@ -246,6 +387,16 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
       accessToken = cached.accessToken;
       account = cached.account;
     }
+
+    // Try reading comprehensive CLI usage first (Gemini + 3p + Argon)
+    const cliResult = yield* probeCli;
+    if (cliResult.length > 0) {
+      return {
+        ...makeUsageLimits({ checkedAt, windows: cliResult }),
+        credentialFingerprint: account,
+      };
+    }
+
     // Endpoints can report different quota groups (the daily endpoint has
     // returned the Claude/GPT group without Gemini), so merge every endpoint's
     // windows. The most-used reading of a bucket wins, as in modelWindows.
@@ -282,11 +433,20 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     const summary = yield* fetchWindows("retrieveUserQuotaSummary", (response) =>
       decodeSummary(response).pipe(Effect.map(summaryWindows)),
     );
-    const windows = summary.length
-      ? summary
-      : yield* fetchWindows("fetchAvailableModels", (response) =>
+    const hasGemini = summary.some((window) => window.id.startsWith("gemini-"));
+    const models = !hasGemini
+      ? yield* fetchWindows("fetchAvailableModels", (response) =>
           decodeModels(response).pipe(Effect.map(modelWindows)),
-        );
+        )
+      : [];
+    const mergedWindows = new Map<string, ServerProviderUsageWindow>();
+    for (const window of [...summary, ...models]) {
+      const previous = mergedWindows.get(window.id);
+      if (!previous || window.usedPercent > previous.usedPercent) {
+        mergedWindows.set(window.id, window);
+      }
+    }
+    const windows = [...mergedWindows.values()];
     if (windows.length === 0) {
       return makeUnavailableUsageLimits({
         checkedAt,
@@ -297,6 +457,8 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
     return { ...makeUsageLimits({ checkedAt, windows }), credentialFingerprint: account };
   });
   const probe = read.pipe(
+    Effect.provideService(FileSystem.FileSystem, fs),
+    Effect.provideService(Path.Path, path),
     Effect.timeout("30 seconds"),
     Effect.catch(() =>
       Effect.gen(function* () {
