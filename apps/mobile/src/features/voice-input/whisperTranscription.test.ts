@@ -84,7 +84,10 @@ describe("getWhisperVoiceTranscriber", () => {
   it("fails preparation with the actionable message when the Groq key is missing", async () => {
     const transcriber = getWhisperVoiceTranscriber({ voiceTranscriptionProvider: "groq" })!;
     await expect(transcriber.prepare({ signal: new AbortController().signal })).rejects.toThrow(
-      new VoiceTranscriptionError({ code: "unavailable", message: "Please configure your Groq API key in Settings > Voice & Dictation." }),
+      new VoiceTranscriptionError({
+        code: "unavailable",
+        message: "Please configure your Groq API key in Settings > Voice & Dictation.",
+      }),
     );
   });
 });

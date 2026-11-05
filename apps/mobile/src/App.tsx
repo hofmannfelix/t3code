@@ -241,18 +241,18 @@ function AppContent() {
             {/* native-stack needs the theme's dark flag to select dark native headers. */}
             <GlobalVoiceInputControl>
               <GlobalAudioPlayerControl>
-              <NativeLayoutMetricsProvider>
-                <Navigation
-                  ref={attachRootNavigation}
-                  linking={appLinking}
-                  onReady={handleNavigationReady}
-                  theme={navigationTheme}
-                  onStateChange={handleNavigationStateChange}
-                />
-                <Dialog.Host />
-                <ThreadArrangementHost />
-                <ProjectChipIconRasterizer />
-              </NativeLayoutMetricsProvider>
+                <NativeLayoutMetricsProvider>
+                  <Navigation
+                    ref={attachRootNavigation}
+                    linking={appLinking}
+                    onReady={handleNavigationReady}
+                    theme={navigationTheme}
+                    onStateChange={handleNavigationStateChange}
+                  />
+                  <Dialog.Host />
+                  <ThreadArrangementHost />
+                  <ProjectChipIconRasterizer />
+                </NativeLayoutMetricsProvider>
               </GlobalAudioPlayerControl>
             </GlobalVoiceInputControl>
             <OverlayPortalHost />

@@ -295,7 +295,7 @@ export function ComposerActionButton(props: {
                   : "accent-foreground"
                 : props.disabled
                   ? "accent-foreground/38"
-                : "accent-primary-foreground"
+                  : "accent-primary-foreground"
           }
           type="monochrome"
         />
