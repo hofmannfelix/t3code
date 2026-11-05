@@ -13,12 +13,9 @@ export interface CompletedReply {
 const threadKey = (shell: EnvironmentThreadShell) => `${shell.environmentId}:${shell.id}`;
 
 /**
- * Finds runs that completed since the previous call. `seenRuns` maps each
- * thread to its last completed run already accounted for (`null` while it has
- * none) and is updated in place. A thread's first sighting only records it, so
- * replies that finished before the watcher knew the thread stay silent: those
- * from before audio was switched on, and those of an environment that connects
- * later.
+ * Runs completed since the previous call; `seenRuns` (thread → last seen run) is updated in
+ * place. A thread's first sighting only records it, so replies finished before audio was on,
+ * or before their environment connected, stay silent.
  */
 export function collectCompletedReplies(
   seenRuns: Map<string, string | null>,

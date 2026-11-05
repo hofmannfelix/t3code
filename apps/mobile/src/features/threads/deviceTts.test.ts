@@ -51,9 +51,7 @@ vi.mock("expo/fetch", () => ({
 import {
   GEMINI_TTS_BASE_URL,
   GEMINI_TTS_DEFAULT_MODEL,
-  STREAM_FIRST_MIN_BYTES,
   STREAM_FIRST_MAX_BYTES,
-  STREAM_NEXT_MIN_BYTES,
   STREAM_NEXT_MAX_BYTES,
   applyEdgeSmoothing,
   findSilenceCutPoint,

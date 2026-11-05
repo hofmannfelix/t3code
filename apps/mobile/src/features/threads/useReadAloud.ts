@@ -278,7 +278,6 @@ export interface ActiveAudioSessionTarget {
 
 let isAudioSessionActive = false;
 let activeAudioSessionTarget: ActiveAudioSessionTarget | null = null;
-let audioSessionActivatedAt = 0;
 const audioSessionListeners = new Set<() => void>();
 
 const notifyAudioSessionListeners = () => {
@@ -441,7 +440,6 @@ export const startGlobalAudioSession = async (
   options?: { readonly persist?: boolean },
 ) => {
   isAudioSessionActive = true;
-  audioSessionActivatedAt = Date.now();
   if (target) {
     activeAudioSessionTarget = target;
     if (target.threadId) {
@@ -486,7 +484,6 @@ export const startGlobalAudioSession = async (
 export const stopGlobalAudioSession = (options?: { readonly persist?: boolean }) => {
   isAudioSessionActive = false;
   activeAudioSessionTarget = null;
-  audioSessionActivatedAt = 0;
   clearArmedReadAloudTargets();
   stopCurrent();
   void deactivateAudioSession();
@@ -579,7 +576,9 @@ let activeAudioLiveActivity: ReturnType<typeof startAgentLiveActivity> = null;
 let lastAudioLiveActivitySignature: string | null = null;
 
 /** Thread rows in the Live Activity follow the thread list, not only playback changes. */
-export const refreshAudioLiveActivity = () => syncAudioLiveActivity(currentSpeech);
+/** `_changedRows` names what changed; the Live Activity reads the current rows itself. */
+export const refreshAudioLiveActivity = (_changedRows?: unknown) =>
+  syncAudioLiveActivity(currentSpeech);
 
 export const syncAudioLiveActivity = (speech: ReadAloudSpeech) => {
   if (Platform.OS !== "ios") return;
@@ -997,7 +996,6 @@ registerAudioPlaybackActivePredicate(
 const MAX_ANNOUNCED_REPLY_KEYS = 200;
 const announcedReplyKeys = new Set<string>();
 
-let enqueueCounter = 0;
 let lastFailureAt = 0;
 let runCounter = 0;
 let isUserPausedState = false;
@@ -1442,6 +1440,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
     : undefined;
 
   const waitingAudioPreference = readAloudPreferences?.readAloudWaitingAudio ?? "music";
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the native waiting-audio mode in step with the preference
   useEffect(() => {
     setGlobalWaitingAudioMode(waitingAudioPreference);
   }, [waitingAudioPreference]);
@@ -1467,6 +1466,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
   const ttsSettings = useAtomValue(
     targetEnvId ? serverEnvironment.settingsValueAtom(targetEnvId) : EMPTY_SETTINGS_ATOM,
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the module-level player reads the server's chunking setting outside React
   useEffect(() => {
     chunkedPlayback =
       ttsSettings?.tts?.chunkedPlayback ?? DEFAULT_SERVER_SETTINGS.tts.chunkedPlayback ?? true;
@@ -2057,12 +2057,12 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
     if (T3NativeControls?.pauseSpeaking) {
       try {
         void T3NativeControls.pauseSpeaking();
-      } catch (e) {}
+      } catch {}
     }
     if (T3NativeControls?.pauseWaitingAudio) {
       try {
         void T3NativeControls.pauseWaitingAudio();
-      } catch (e) {}
+      } catch {}
     }
     setSpeech({ ...currentSpeech, phase: "paused" });
   }, []);
@@ -2091,11 +2091,11 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
             projectTitle: currentSpeech.projectTitle ?? activeAudioSessionTarget?.projectTitle,
             title: "Warte auf Antwort...",
           });
-        } catch (e) {}
+        } catch {}
       } else if (T3NativeControls?.resumeSpeaking) {
         try {
           void T3NativeControls.resumeSpeaking();
-        } catch (e) {}
+        } catch {}
       }
       setSpeech({ ...currentSpeech, phase: null });
       return;
@@ -2103,7 +2103,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
     if (T3NativeControls?.resumeSpeaking && currentSpeech.phase === "paused") {
       try {
         void T3NativeControls.resumeSpeaking();
-      } catch (e) {}
+      } catch {}
       setSpeech({ ...currentSpeech, phase: "playing" });
       return;
     }
@@ -2115,6 +2115,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
     stopCurrent();
   }, []);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers this mount's synthesizers with the module-level answer queue
   useEffect(() => {
     activeStartAnswerBlock = (item: ReadItem, isCurrent: () => boolean) => {
       if (deviceTtsConfig && !item.clipUri) {
@@ -2157,11 +2158,8 @@ function isMessageEntry(entry: unknown): entry is ThreadFeedMessageEntry {
 }
 
 /**
- * Announces newly finished assistant replies of one thread to the shared
- * queue while auto-read is on. History stays silent: only replies that
- * complete while this feed is mounted are spoken.
- * Crucially: switching threads does NOT cancel or re-initialize an actively
- * playing speech session.
+ * Queues replies of one thread that finish while its feed is mounted; history stays silent.
+ * Switching threads never stops the audio that is already playing.
  */
 export function useReadAloudAutoAnnounce(input: {
   readonly environmentId: EnvironmentId;
@@ -2172,17 +2170,18 @@ export function useReadAloudAutoAnnounce(input: {
   readonly turnParts?: ReadonlyMap<string, ReadonlyArray<TurnPart>>;
 }) {
   const { environmentId, threadId, threadTitle, projectTitle, feed, turnParts } = input;
-  const { enqueue, speak } = useReadAloud(environmentId);
+  const { enqueue } = useReadAloud(environmentId);
   const preferencesResult = useAtomValue(mobilePreferencesAtom);
   const autoRead =
     AsyncResult.isSuccess(preferencesResult) && preferencesResult.value.readAloudAutoSpeak === true;
 
   const announcedIdsRef = useRef<Set<string>>(new Set());
   const seenStreamingIdsRef = useRef<Set<string>>(new Set());
-  const threadOpenedAtRef = useRef<number>(Date.now());
+  const threadOpenedAtRef = useRef(0);
   const initialLoadHandledRef = useRef(false);
   const lastThreadKeyRef = useRef<string | null>(null);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- resets the per-thread announce bookkeeping when the mounted thread changes
   useEffect(() => {
     if (lastThreadKeyRef.current === threadId) return;
     lastThreadKeyRef.current = threadId;
@@ -2193,6 +2192,7 @@ export function useReadAloudAutoAnnounce(input: {
     // Do NOT stop() here. Existing audio sessions continue playing globally!
   }, [threadId]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- hands newly finished replies to the module-level read-aloud queue
   useEffect(() => {
     if (!Array.isArray(feed)) return;
     const newlyFinished: Array<{ readonly key: string; readonly text: string }> = [];
@@ -2260,15 +2260,5 @@ export function useReadAloudAutoAnnounce(input: {
         });
       }
     }
-  }, [
-    autoRead,
-    environmentId,
-    feed,
-    speak,
-    enqueue,
-    threadId,
-    threadTitle,
-    projectTitle,
-    turnParts,
-  ]);
+  }, [autoRead, environmentId, feed, enqueue, threadId, threadTitle, projectTitle, turnParts]);
 }

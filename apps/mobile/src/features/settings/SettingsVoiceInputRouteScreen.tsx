@@ -1,19 +1,18 @@
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
-import { useNavigation } from "@react-navigation/native";
 import { AsyncResult } from "effect/reactivity";
 import { useState } from "react";
-import { Alert, Linking, Platform, Pressable, ScrollView, View } from "react-native";
+import { Alert, Linking, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AndroidScreenHeader } from "../../components/ui/AndroidScreenHeader";
 import { AppText as Text, AppTextInput } from "../../components/ui/AppText";
 import { SymbolView } from "../../components/ui/AppSymbol";
-import { NativeStackScreenOptions } from "../../native/StackHeader";
+import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { type VoiceTranscriptionProvider } from "../../persistence/mobile-preferences";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { GEMINI_TTS_DEFAULT_MODEL, GEMINI_TTS_DEFAULT_VOICE } from "../threads/deviceTts";
 import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
 import { SettingsSection } from "./components/SettingsSection";
+import { SettingsScreen } from "./components/SettingsScreen";
 
 interface ProviderOption {
   readonly id: VoiceTranscriptionProvider;
@@ -45,7 +44,6 @@ const PROVIDER_OPTIONS: ReadonlyArray<ProviderOption> = [
 ];
 
 export function SettingsVoiceInputRouteScreen() {
-  const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const preferencesResult = useAtomValue(mobilePreferencesAtom);
   const savePreferences = useAtomSet(updateMobilePreferencesAtom);
@@ -106,13 +104,7 @@ export function SettingsVoiceInputRouteScreen() {
   };
 
   return (
-    <View collapsable={false} className="flex-1 bg-sheet">
-      {Platform.OS === "android" ? (
-        <>
-          <NativeStackScreenOptions options={{ headerShown: false }} />
-          <AndroidScreenHeader title="Voice & Dictation" onBack={() => navigation.goBack()} />
-        </>
-      ) : null}
+    <SettingsScreen title="Voice & Dictation">
       <ScrollView
         contentInsetAdjustmentBehavior="automatic"
         showsVerticalScrollIndicator={false}
@@ -270,7 +262,7 @@ export function SettingsVoiceInputRouteScreen() {
           onWaitingAudioChange={handleSelectWaitingAudio}
         />
       </ScrollView>
-    </View>
+    </SettingsScreen>
   );
 }
 

@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { File, Paths } from "expo-file-system";
+import { Paths } from "expo-file-system";
 // expo/fetch streams `response.body` incrementally; the global React Native
 // fetch buffers the whole reply first, which would delay audio to the very end.
 import { fetch } from "expo/fetch";
@@ -203,7 +203,9 @@ async function synthesizeBytes(
     signal,
   });
   if (!response.ok) {
-    throw new DeviceTtsError({ message: `Gemini rejected the speech request with status ${response.status}.` });
+    throw new DeviceTtsError({
+      message: `Gemini rejected the speech request with status ${response.status}.`,
+    });
   }
   const json = (await response.json()) as {
     candidates?: Array<{
@@ -300,11 +302,15 @@ export async function* streamWavSegments(
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
         continue;
       }
-      throw new DeviceTtsError({ message: "Gemini rejected the speech request with status 429 (rate limit)." });
+      throw new DeviceTtsError({
+        message: "Gemini rejected the speech request with status 429 (rate limit).",
+      });
     }
 
     if (!res.ok) {
-      throw new DeviceTtsError({ message: `Gemini rejected the speech request with status ${res.status}.` });
+      throw new DeviceTtsError({
+        message: `Gemini rejected the speech request with status ${res.status}.`,
+      });
     }
     if (!res.body) {
       throw new DeviceTtsError({ message: "Gemini's audio stream could not be read." });
@@ -334,7 +340,9 @@ export async function* streamWavSegments(
     await writer.write(pcmToWav(pcm, 24_000));
     await writer.close();
     if (!file.exists) {
-      throw new DeviceTtsError({ message: "The synthesized audio clip could not be stored on this device." });
+      throw new DeviceTtsError({
+        message: "The synthesized audio clip could not be stored on this device.",
+      });
     }
     return file.uri;
   };
@@ -430,7 +438,9 @@ export async function synthesizeClipFile(
   await writer.write(audio.bytes);
   await writer.close();
   if (!file.exists) {
-    throw new DeviceTtsError({ message: "The synthesized audio clip could not be stored on this device." });
+    throw new DeviceTtsError({
+      message: "The synthesized audio clip could not be stored on this device.",
+    });
   }
   return file.uri;
 }

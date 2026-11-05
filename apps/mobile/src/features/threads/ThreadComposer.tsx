@@ -32,7 +32,14 @@ import {
 import { StackActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useEffectEvent, useRef, useState, type RefObject } from "react";
-import { I18nManager, Keyboard, Platform, type StyleProp, View, type ViewStyle } from "react-native";
+import {
+  I18nManager,
+  Keyboard,
+  Platform,
+  type StyleProp,
+  View,
+  type ViewStyle,
+} from "react-native";
 import { composerImageGallery } from "../../lib/composerImageGallery";
 import { filePreviewGallery } from "../../lib/filePreviewGallery";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
@@ -754,6 +761,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     props.selectedThread.title,
     voiceInput,
   ]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends once the dictation started by Transcribe and send has settled
   useEffect(() => {
     if (!sendAfterDictationRef.current) return;
     const phase = voiceInput.state.phase;

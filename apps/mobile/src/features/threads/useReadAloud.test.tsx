@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import type { EnvironmentId } from "@t3tools/contracts";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -841,7 +840,7 @@ describe("useReadAloudAutoAnnounce", () => {
   });
 
   it("silences historical messages when opening a thread, even if feed loads asynchronously", async () => {
-    const pastTime = new Date(Date.now() - 60_000).toISOString();
+    const pastTime = "2020-01-01T00:00:00.000Z";
     const harnessView = renderAutoAnnounce({ threadId: "thread-1", feed: [] });
     await flush();
 
@@ -952,7 +951,7 @@ describe("useReadAloudAutoAnnounce", () => {
     await flush();
 
     // User switches to thread-2 with existing history
-    const pastTime = new Date(Date.now() - 30_000).toISOString();
+    const pastTime = "2020-01-01T00:00:30.000Z";
     harnessView.rerender({
       threadId: "thread-2",
       feed: [

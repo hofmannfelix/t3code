@@ -144,13 +144,7 @@ function AgentActivity(
       ? phaseTint(failedRow.phase)
       : tint;
 
-  // With nothing active the aggregate only carries recently finished work, so
-  // "0 active agents" (and a lone "0" in the expanded island) read as broken.
-  // Lead with the outcome instead. The outcome is derived here from the rows
-  // rather than taken from the server subtitle (which keys off the newest
-  // terminal row): every presentation — header text, tint, count slots,
-  // minimal glyph — must agree, and a failure anywhere should dominate a
-  // newer success.
+  // Audio keeps the activity alive with no agent running; it is not "done".
   const allDone = props.activeCount === 0 && !hasAudioActive;
   const doneLabel = failedRow ? "Failed" : "Done";
   const outcomeLabel = failedRow ? "Agent work failed" : "Agent work completed";
@@ -467,45 +461,49 @@ function AgentActivity(
     compactTrailing:
       hasAudioActive && props.activeCount <= 1 ? (
         <Text
-          modifiers={[font({ weight: "semibold", size: 11 }), foregroundStyle(tint), ...linkModifiers]}
+          modifiers={[
+            font({ weight: "semibold", size: 11 }),
+            foregroundStyle(tint),
+            ...linkModifiers,
+          ]}
         >
           Audio
         </Text>
       ) : showCompactGlyph ? (
-      <HStack
-        modifiers={[
-          padding({ trailing: 2 }),
-          accessibilityElement("ignore"),
-          accessibilityLabel(agentsLabel),
-          ...linkModifiers,
-        ]}
-      >
-        {renderGlyph(phaseSymbol(heroRow?.phase ?? "running"), 14, tint)}
-      </HStack>
-    ) : (
-      <Text
-        modifiers={[
-          font({ weight: "semibold", size: 11 }),
-          foregroundStyle(tint),
-          lineLimit(1),
-          minimumScaleFactor(0.5),
-          ...linkModifiers,
-        ]}
-      >
-        {attentionRow
-          ? attentionRow.phase === "waiting_for_approval"
-            ? "Approval"
-            : "Input"
-          : failedRow
-            ? "Failed"
-            : activeLabel}
-      </Text>
-    ),
+        <HStack
+          modifiers={[
+            padding({ trailing: 2 }),
+            accessibilityElement("ignore"),
+            accessibilityLabel(agentsLabel),
+            ...linkModifiers,
+          ]}
+        >
+          {renderGlyph(phaseSymbol(heroRow?.phase ?? "running"), 14, tint)}
+        </HStack>
+      ) : (
+        <Text
+          modifiers={[
+            font({ weight: "semibold", size: 11 }),
+            foregroundStyle(tint),
+            lineLimit(1),
+            minimumScaleFactor(0.5),
+            ...linkModifiers,
+          ]}
+        >
+          {attentionRow
+            ? attentionRow.phase === "waiting_for_approval"
+              ? "Approval"
+              : "Input"
+            : failedRow
+              ? "Failed"
+              : activeLabel}
+        </Text>
+      ),
     minimal: hasAudioActive
       ? renderGlyph("speaker.wave.2.fill", 13, isLightScheme ? "#059669" : "#34d399", linkModifiers)
       : heroRow
-      ? renderGlyph(phaseSymbol(heroRow.phase), 13, phaseTint(heroRow.phase), linkModifiers)
-      : renderLogo(11, tint, linkModifiers),
+        ? renderGlyph(phaseSymbol(heroRow.phase), 13, phaseTint(heroRow.phase), linkModifiers)
+        : renderLogo(11, tint, linkModifiers),
     expandedLeading: (
       <HStack spacing={5} alignment="center" modifiers={[padding({ leading: 4, vertical: 4 })]}>
         {renderLogo(15, tint)}

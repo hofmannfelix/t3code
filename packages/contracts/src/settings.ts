@@ -891,12 +891,9 @@ export const SourceControlHostSettings = Schema.Record(Schema.String, Schema.Unk
 export type SourceControlHostSettings = typeof SourceControlHostSettings.Type;
 
 /**
- * Cloud text-to-speech for the clients' read-aloud action, following the
- * OpenAI-compatible `/audio/speech` API shape so OpenAI, Groq, and self-hosted
- * gateways work with one configuration. The API key lives in the server's
- * secret store; settings and clients only see a redaction marker when one is
- * saved. Empty fields fall back to the OpenAI defaults the server applies,
- * and clients without a key read messages with the platform's own voices.
+ * Read-aloud synthesis in the OpenAI-compatible `/audio/speech` shape, or Gemini.
+ * The API key lives in the secret store; clients only see a redaction marker.
+ * Empty fields fall back to the provider defaults the server applies.
  */
 export const TtsSettings = Schema.Struct({
   baseUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),

@@ -15,7 +15,7 @@ import { FullWindowOverlay } from "react-native-screens";
 import * as Option from "effect/Option";
 
 import { SymbolView } from "../../components/ui/AppSymbol";
-import { rootNavigationRef } from "../../lib/rootNavigation";
+import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
 import { gatherMessageTurnParts } from "../../lib/threadActivity";
 import { useEnvironmentThread } from "../../state/threads";
 import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
@@ -78,15 +78,8 @@ function ReadAloudProgressLine() {
 }
 
 /**
- * Floating Audio Control displayed inside ThreadDetailScreen.
- * Sits directly below the navigation bar.
- *
- * Inactive state:
- *   A compact, grayed-out speaker button anchored at the top right.
- *
- * Active state:
- *   Handled globally by GlobalAudioPlayerControl so it stays persistent
- *   across all navigation screens and transitions.
+ * The inactive speaker toggle below a thread's navigation bar. The active bar is
+ * GlobalAudioPlayerControl, so it survives navigation.
  */
 export function ThreadAudioFloatingControl(props: {
   readonly environmentId?: EnvironmentId;
@@ -129,7 +122,7 @@ export function ThreadAudioFloatingControl(props: {
           void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
           toggleAudioMode(true);
         }}
-        className="size-9 items-center justify-center rounded-full border border-black/10 bg-white/85 shadow-md shadow-black/15 backdrop-blur-xl active:scale-95 active:opacity-75 dark:border-white/15 dark:bg-zinc-800/85 dark:shadow-black/50"
+        className="size-9 items-center justify-center rounded-full border border-border bg-card shadow-md shadow-black/15 active:scale-95 active:opacity-75"
       >
         <SymbolView
           name="speaker.wave.2"
@@ -191,11 +184,12 @@ export function ThreadAudioBar(props?: {
   // Always show project title, NEVER the thread title:
   const targetProjectTitle = speech.projectTitle ?? activeTarget?.projectTitle ?? "T3 Code";
 
+  const selectDetail = useSelectWorkspaceDetail();
   const handleNavigateToThread = () => {
-    if (targetEnvId && targetThreadId && rootNavigationRef.isReady()) {
-      rootNavigationRef.navigate("Thread", {
-        environmentId: targetEnvId,
-        threadId: targetThreadId,
+    if (targetEnvId && targetThreadId) {
+      selectDetail({
+        name: "Thread",
+        params: { environmentId: String(targetEnvId), threadId: String(targetThreadId) },
       });
     }
   };
@@ -214,7 +208,7 @@ export function ThreadAudioBar(props?: {
       className="absolute left-3 right-3 z-50 items-center"
       style={{ top }}
     >
-      <View className="w-full max-w-md flex-row items-center justify-between rounded-full border border-black/10 bg-white/98 px-3.5 py-1.5 shadow-xl shadow-black/25 backdrop-blur-xl dark:border-white/20 dark:bg-zinc-800/98 dark:shadow-black/70">
+      <View className="w-full max-w-md flex-row items-center justify-between rounded-full border border-border bg-card px-3.5 py-1.5 shadow-xl shadow-black/25">
         {/* Left status / speaker indicator (tappable to jump to thread) */}
         <Pressable
           disabled={!canNavigate}
@@ -358,6 +352,7 @@ function ArmedThreadAudioWatcher(props: { readonly target: ArmedReadAloudTarget 
   const initialLoadHandledRef = useRef<boolean>(false);
   const spokenMessageIdsRef = useRef<Set<string>>(new Set());
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- feeds finished replies of this armed thread into the module-level read-aloud queue
   useEffect(() => {
     const projection = Option.getOrNull(threadDetailState.data);
     const messages = projection?.messages;
@@ -449,6 +444,7 @@ function CompletedReplyAnnouncer(props: {
   );
   const threadDetailState = useEnvironmentThread(targetSpec.environmentId, targetSpec.threadId);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- hands one completed reply to the module-level read-aloud queue once its text has loaded
   useEffect(() => {
     if (threadDetailState.status === "deleted") {
       onDone(reply.runId);
@@ -487,6 +483,7 @@ function CompletedReplyWatcher() {
   const seenRunsRef = useRef(new Map<string, string | null>());
   const [pending, setPending] = useState<ReadonlyArray<CompletedReply>>([]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- diffs live thread shells against the runs already seen to find replies for the read-aloud queue
   useEffect(() => {
     const completed = collectCompletedReplies(seenRunsRef.current, shells);
     // Armed threads keep their own live watcher.
@@ -513,8 +510,9 @@ function CompletedReplyWatcher() {
 /** Keeps the Live Activity's thread rows in step with the thread list while audio is on. */
 function AudioLiveActivityRefresher() {
   const shells = useAtomValue(environmentThreadShells.navigationThreadShellsAtom);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- pushes the thread rows into the native Live Activity whenever the shells change
   useEffect(() => {
-    refreshAudioLiveActivity();
+    refreshAudioLiveActivity(shells);
   }, [shells]);
   return null;
 }
@@ -548,6 +546,7 @@ export function GlobalAudioPlayerControl(props: { readonly children: ReactNode }
     : undefined;
   const sessionRestoredRef = useRef(false);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- restores the persisted native audio session once preferences have loaded
   useEffect(() => {
     if (sessionRestoredRef.current || !preferences) return;
     sessionRestoredRef.current = true;
