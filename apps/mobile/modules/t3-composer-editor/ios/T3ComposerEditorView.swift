@@ -24,6 +24,7 @@ private struct ComposerControlledDocumentPayload: Decodable {
   let tokensJson: String
   let mostRecentEventCount: Int
   let isNativeEcho: Bool
+  let resetGeneration: Int
 }
 
 private struct ComposerThemePayload: Decodable {
@@ -85,9 +86,7 @@ private final class ComposerTextView: UITextView {
   var textPasteThresholdBytes = 0
   var maxInputChars = Int.max
   var enterBehavior: ComposerEnterBehavior = .send
-  /// Shortcut HUD titles. JS supplies what the two sends actually do right now
-  /// ("Queue Message" / "Steer Message"), so the iPad Command-hold list names
-  /// the outcome rather than a generic "Send".
+  /// JS supplies the actual send outcomes so the iPad Command-hold HUD names the configured actions.
   var submitTitle = "Send Message"
   var alternateSubmitTitle = "Send Message"
   private var bypassTextPasteInterception = false
@@ -95,9 +94,6 @@ private final class ComposerTextView: UITextView {
   override var keyCommands: [UIKeyCommand]? {
     var commands = super.keyCommands ?? []
     guard !isReadOnly, markedTextRange == nil else { return commands }
-    // The plainer chord always performs the configured follow-up behavior and
-    // the more-modified one performs its opposite, so Command is the "other
-    // way" modifier whichever Return behavior is configured.
     if enterBehavior == .send {
       let submitOnReturn = UIKeyCommand(
         input: "\r",
@@ -229,6 +225,12 @@ private final class ComposerTextView: UITextView {
     if !bypassTextPasteInterception,
        let text = pasteboard.string, shouldInterceptTextPaste(text) {
       onPasteText?(text, selectedRange)
+      return
+    }
+    // read() sees only the first item; native paste keeps every item of a longer pasteboard.
+    if !bypassTextPasteInterception, pasteboard.numberOfItems == 1,
+       T3ComposerClipboard.hasThreadLink(context["text", default: ""]) {
+      onPasteContext?(context)
       return
     }
     super.paste(sender)
@@ -443,6 +445,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   private var isReadOnly = false
   private var isApplyingControlledValue = false
   private var nativeEventCount = 0
+  private var resetGeneration = 0
   private var lastContentSize = CGSize.zero
   private var iconImages: [String: UIImage] = [:]
   private var pendingIconUris = Set<String>()
@@ -488,6 +491,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       var payload: [String: Any] = context
       payload["value"] = self.textView.serializedText()
       payload["eventCount"] = self.nativeEventCount
+      payload["resetGeneration"] = self.resetGeneration
       payload["selection"] = ["start": selection.start, "end": selection.end]
       self.onComposerPasteContext(payload)
     }
@@ -498,6 +502,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       self.onComposerPasteText([
         "value": self.textView.serializedText(),
         "eventCount": self.nativeEventCount,
+        "resetGeneration": self.resetGeneration,
         "text": text,
         "selection": ["start": selection.start, "end": selection.end],
       ])
@@ -650,11 +655,21 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
   }
 
   func setControlledDocumentJson(_ documentJson: String) {
-    guard let document = decode(ComposerControlledDocumentPayload.self, from: documentJson),
-          document.mostRecentEventCount >= nativeEventCount else {
+    guard let document = decode(ComposerControlledDocumentPayload.self, from: documentJson) else {
       return
     }
-    if document.isNativeEcho && textView.serializedText() != document.value {
+    // A parent reset (a send clear) wins over native edits it could not see; JS drops their events
+    // by generation, so the revision restarts where the parent last acknowledged.
+    let isReset = document.resetGeneration > resetGeneration
+    guard isReset || document.mostRecentEventCount >= nativeEventCount else {
+      return
+    }
+    if isReset {
+      resetGeneration = document.resetGeneration
+      nativeEventCount = document.mostRecentEventCount
+      endComposition()
+    }
+    if document.isNativeEcho && !isReset && textView.serializedText() != document.value {
       return
     }
     if tokensJson != document.tokensJson {
@@ -899,6 +914,15 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
     emitContentSizeIfNeeded()
   }
 
+  private func endComposition() {
+    guard textView.markedTextRange != nil else {
+      return
+    }
+    isApplyingControlledValue = true
+    textView.unmarkText()
+    isApplyingControlledValue = false
+  }
+
   private func makeAttributedDocument() -> NSAttributedString {
     let result = NSMutableAttributedString()
     let source = value as NSString
@@ -1112,6 +1136,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       "value": value,
       "selection": ["start": selection.start, "end": selection.end],
       "eventCount": nativeEventCount,
+      "resetGeneration": resetGeneration,
     ])
     updatePlaceholderVisibility()
     emitContentSizeIfNeeded()
@@ -1128,6 +1153,7 @@ public final class T3ComposerEditorView: ExpoView, UITextViewDelegate, UITextDro
       "value": currentValue,
       "selection": ["start": selection.start, "end": selection.end],
       "eventCount": nativeEventCount,
+      "resetGeneration": resetGeneration,
     ])
   }
 

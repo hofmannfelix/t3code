@@ -9,8 +9,11 @@ import {
   type VoiceInputControllerDependencies,
   type VoiceRecorder,
 } from "./controller.ts";
-import type { PreparedVoiceTranscription, VoiceTranscriber } from "./transcription.ts";
-import { VoiceTranscriptionError } from "./transcription.ts";
+import {
+  VoiceTranscriptionError,
+  type PreparedVoiceTranscription,
+  type VoiceTranscriber,
+} from "./transcription.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -116,6 +119,21 @@ describe("VoiceInputController", () => {
     await unsupported.controller.start();
     expect(unsupported.controller.currentState.error).toContain("not available");
     expect(unsupported.recorder.record).not.toHaveBeenCalled();
+
+    const reason = new VoiceTranscriptionError({
+      code: "unavailable",
+      message: "This device requires iOS 26 or later.",
+    });
+    const unavailable = createHarness({
+      getTranscriber: () => ({
+        prepare: async () => {
+          throw reason;
+        },
+      }),
+    });
+    await unavailable.controller.start();
+    expect(unavailable.controller.currentState.error).toBe(reason.message);
+    expect(unavailable.recorder.record).not.toHaveBeenCalled();
 
     const denied = createHarness({
       requestPermission: async () => ({ granted: false, canAskAgain: false }),
@@ -351,10 +369,7 @@ describe("VoiceInputController", () => {
       getTranscriber: () => ({
         prepare: async () =>
           preparedTranscription(async () => {
-            throw new VoiceTranscriptionError(
-              "transcription-failed",
-              "Transcription request failed (401): Invalid API Key",
-            );
+            throw new VoiceTranscriptionError({ code: "transcription-failed", message: "Transcription request failed (401): Invalid API Key" });
           }),
       }),
     });
@@ -597,10 +612,7 @@ describe("VoiceInputController", () => {
           preparedTranscription(async () => {
             if (failFirst) {
               failFirst = false;
-              throw new VoiceTranscriptionError(
-                "transcription-failed",
-                "Transcription request timed out",
-              );
+              throw new VoiceTranscriptionError({ code: "transcription-failed", message: "Transcription request timed out" });
             }
             return "retried text";
           }),
@@ -629,7 +641,7 @@ describe("VoiceInputController", () => {
       getTranscriber: () => ({
         prepare: async () =>
           preparedTranscription(async () => {
-            throw new VoiceTranscriptionError("transcription-failed", "Network error");
+            throw new VoiceTranscriptionError({ code: "transcription-failed", message: "Network error" });
           }),
       }),
     });

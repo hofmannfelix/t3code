@@ -5,8 +5,11 @@ import {
   type VoiceTranscriber,
   type VoiceTranscriptionOptions,
 } from "@t3tools/client-runtime/voice-input";
+import * as Schema from "effect/Schema";
 import { File } from "expo-file-system";
 import type { Preferences } from "../../persistence/mobile-preferences";
+
+const isVoiceTranscriptionError = Schema.is(VoiceTranscriptionError);
 
 export const GROQ_WHISPER_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
 export const GROQ_DEFAULT_MODEL = "whisper-large-v3-turbo";
@@ -47,17 +50,17 @@ export function getWhisperVoiceTranscriber(preferences?: Preferences): VoiceTran
       // Validate required credentials before proceeding
       if (provider !== "custom" && !rawApiKey) {
         const providerName = provider === "groq" ? "Groq" : "OpenAI";
-        throw new VoiceTranscriptionError(
-          "unavailable",
-          `Please configure your ${providerName} API key in Settings > Voice & Dictation.`,
-        );
+        throw new VoiceTranscriptionError({
+          code: "unavailable",
+          message: `Please configure your ${providerName} API key in Settings > Voice & Dictation.`,
+        });
       }
 
       if (provider === "custom" && !customEndpoint) {
-        throw new VoiceTranscriptionError(
-          "unavailable",
-          "Please configure your Custom Whisper endpoint in Settings > Voice & Dictation.",
-        );
+        throw new VoiceTranscriptionError({
+          code: "unavailable",
+          message: "Please configure your Custom Whisper endpoint in Settings > Voice & Dictation.",
+        });
       }
 
       return {
@@ -139,27 +142,27 @@ async function transcribeWithWhisperApi({
           errorMessage += `: ${errorText.slice(0, 200)}`;
         }
       }
-      throw new VoiceTranscriptionError("transcription-failed", errorMessage);
+      throw new VoiceTranscriptionError({ code: "transcription-failed", message: errorMessage });
     }
 
     const json = await response.json();
     throwIfVoiceTranscriptionAborted(signal);
 
     if (typeof json.text !== "string") {
-      throw new VoiceTranscriptionError(
-        "transcription-failed",
-        "Invalid response format: missing transcription text.",
-      );
+      throw new VoiceTranscriptionError({
+        code: "transcription-failed",
+        message: "Invalid response format: missing transcription text.",
+      });
     }
 
     return json.text.trim();
   } catch (error) {
     throwIfVoiceTranscriptionAborted(signal);
-    if (error instanceof VoiceTranscriptionError) throw error;
-    throw new VoiceTranscriptionError(
-      "transcription-failed",
-      error instanceof Error ? error.message : "Voice transcription failed.",
-      { cause: error },
-    );
+    if (isVoiceTranscriptionError(error)) throw error;
+    throw new VoiceTranscriptionError({
+      code: "transcription-failed",
+      message: error instanceof Error ? error.message : "Voice transcription failed.",
+      cause: error,
+    });
   }
 }

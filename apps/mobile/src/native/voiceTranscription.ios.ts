@@ -1,5 +1,4 @@
-import { getWhisperVoiceTranscriber } from "../features/voice-input/whisperTranscription";
-import type { Preferences } from "../persistence/mobile-preferences";
+import * as Schema from "effect/Schema";
 import AppleTranscription from "@react-native-ai/apple/src/NativeAppleTranscription";
 import { File } from "expo-file-system";
 
@@ -11,6 +10,8 @@ import {
   type VoiceTranscriptionOptions,
 } from "@t3tools/client-runtime/voice-input";
 
+const isVoiceTranscriptionError = Schema.is(VoiceTranscriptionError);
+
 function getDeviceLocale(): string {
   return Intl.DateTimeFormat().resolvedOptions().locale;
 }
@@ -20,7 +21,7 @@ function wrapError(
   message: string,
   cause: unknown,
 ): VoiceTranscriptionError {
-  if (cause instanceof VoiceTranscriptionError) {
+  if (isVoiceTranscriptionError(cause)) {
     return cause;
   }
 
@@ -32,7 +33,11 @@ function wrapError(
       : cause instanceof Error && cause.message.trim()
         ? cause.message.trim()
         : "";
-  return new VoiceTranscriptionError(code, detail ? `${message} (${detail})` : message, { cause });
+  return new VoiceTranscriptionError({
+    code,
+    message: detail ? `${message} (${detail})` : message,
+    cause,
+  });
 }
 
 function getNativeErrorCode(error: unknown): string | undefined {
@@ -43,33 +48,7 @@ function getNativeErrorCode(error: unknown): string | undefined {
   return typeof error.code === "string" ? error.code : undefined;
 }
 
-export function getVoiceTranscriber(preferences?: Preferences): VoiceTranscriber | null {
-  const provider = preferences?.voiceTranscriptionProvider;
-
-  if (provider === "apple") {
-    return getLocalVoiceTranscriber();
-  }
-  if (provider === "groq" || provider === "openai" || provider === "custom") {
-    return getWhisperVoiceTranscriber(preferences);
-  }
-
-  // If an API key or custom endpoint is configured, prioritize Whisper
-  if (
-    preferences?.voiceTranscriptionApiKey?.trim() ||
-    preferences?.voiceTranscriptionCustomEndpoint?.trim()
-  ) {
-    return getWhisperVoiceTranscriber(preferences);
-  }
-
-  // Otherwise, fallback to on-device Apple Speech if available
-  const local = getLocalVoiceTranscriber();
-  if (local) return local;
-
-  // On devices where Apple Speech is not available, default to Groq Whisper
-  return getWhisperVoiceTranscriber(preferences);
-}
-
-export function getLocalVoiceTranscriber(): VoiceTranscriber | null {
+export async function getLocalVoiceTranscriber(): Promise<VoiceTranscriber | null> {
   const locale = getDeviceLocale();
   if (!AppleTranscription.isAvailable(locale)) return null;
   return { prepare: (options) => prepareVoiceTranscription(locale, options) };
@@ -81,10 +60,10 @@ async function prepareVoiceTranscription(
 ): Promise<PreparedVoiceTranscription> {
   throwIfVoiceTranscriptionAborted(signal);
   if (!AppleTranscription.isAvailable(locale)) {
-    throw new VoiceTranscriptionError(
-      "unavailable",
-      "Voice transcription requires a supported device with iOS 26 or later.",
-    );
+    throw new VoiceTranscriptionError({
+      code: "unavailable",
+      message: "Voice transcription requires a supported device with iOS 26 or later.",
+    });
   }
 
   try {
@@ -97,11 +76,11 @@ async function prepareVoiceTranscription(
   } catch (error) {
     throwIfVoiceTranscriptionAborted(signal);
     if (getNativeErrorCode(error) === "AppleTranscriptionUnsupportedLocale") {
-      throw new VoiceTranscriptionError(
-        "unsupported-locale",
-        "Voice transcription does not support this device language.",
-        { cause: error },
-      );
+      throw new VoiceTranscriptionError({
+        code: "unsupported-locale",
+        message: "Voice transcription does not support this device language.",
+        cause: error,
+      });
     }
 
     throw wrapError(

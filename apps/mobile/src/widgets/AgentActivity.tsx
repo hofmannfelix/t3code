@@ -1,4 +1,4 @@
-import { Circle, HStack, Image, Link, Spacer, Text, VStack, ZStack } from "@expo/ui/swift-ui";
+import { HStack, Image, Link, Spacer, Text, VStack, ZStack } from "@expo/ui/swift-ui";
 import type { ComponentProps } from "react";
 import {
   accessibilityElement,
@@ -59,26 +59,21 @@ export interface AgentActivityProps {
   readonly audioProjectTitle?: string | null;
 }
 
-// This function is serialized into the widget extension's JS bundle, so it
-// must stay self-contained: no references to module-scope helpers, only the
-// imported view/modifier factories.
-export function AgentActivity(
+// Widget serialization excludes module helpers; use only imported view/modifier factories.
+function AgentActivity(
   props: AgentActivityProps,
   environment: LiveActivityEnvironment,
 ): LiveActivityLayout {
   "widget";
 
-  // Hierarchical styles inherit the system's foreground treatment, including
-  // tinted and vibrant presentations, rather than resolving to a label color.
+  // Hierarchical foregrounds inherit system tint and vibrancy.
   type Foreground = Parameters<typeof foregroundStyle>[0];
   const primaryForeground = { type: "hierarchical", style: "primary" } as const;
   const secondaryForeground = { type: "hierarchical", style: "secondary" } as const;
   const monochrome =
     environment.widgetRenderingMode === "accented" || environment.widgetRenderingMode === "vibrant";
 
-  // On iPhone the LA sits on a dark material, but macOS (iPhone Mirroring /
-  // Mac notification center) renders it on a light one — so pick the web
-  // palette's light (-600) or dark (-300) variant off the color scheme.
+  // iPhone uses dark Live Activity material, macOS light; choose the web palette variant by color scheme.
   const isLightScheme = environment.colorScheme === "light";
   const phaseTint = (phase: AgentActivityPhase | undefined): Foreground => {
     if (environment.isLuminanceReduced) {
@@ -111,9 +106,7 @@ export function AgentActivity(
     if (phase === "running" || phase === "starting") return 2;
     return 3;
   };
-  // Past the stale date the system stops vouching for the content, so every
-  // in-flight row degrades to "stale" rather than claiming an agent is still
-  // working.
+  // Mark in-flight rows stale after expiry so they cannot claim agents still work.
   const activities: ReadonlyArray<AgentActivityRowProps> = environment.isStale
     ? props.activities.map((row) =>
         row.phase === "completed" || row.phase === "failed"
@@ -179,12 +172,10 @@ export function AgentActivity(
     : environment.isStale
       ? "Out of date"
       : `${props.activeCount} active`;
-  const showCompactCount = !attentionRow && !allDone && !environment.isStale;
-  const compactCountLabel = props.activeCount > 99 ? "99+" : `${props.activeCount}`;
+  const showCompactGlyph = !attentionRow && !failedRow && !allDone && !environment.isStale;
   const summary = attentionSuffix || activeLabel;
 
-  // Any registered scheme variant routes back to this app; taps are delivered
-  // to the widget's containing app, so the prod scheme is safe for all builds.
+  // Widget taps target the containing app, so its production scheme is safe in every build.
   const deepLinkRow = attentionRow ?? row0;
   const deepLink =
     deepLinkRow && deepLinkRow.deepLink.startsWith("/") && !deepLinkRow.deepLink.startsWith("//")
@@ -216,7 +207,8 @@ export function AgentActivity(
         return "clock.arrow.circlepath";
       case "running":
       default:
-        return "arrow.triangle.2.circlepath";
+        // Matches the thread list's Working indicator.
+        return "circle.dashed";
     }
   };
 
@@ -474,64 +466,46 @@ export function AgentActivity(
     ),
     compactTrailing:
       hasAudioActive && props.activeCount <= 1 ? (
-        <HStack spacing={3} alignment="center">
-          <Text
-            modifiers={[
-              font({ weight: "semibold", size: 11 }),
-              foregroundStyle(tint),
-              ...linkModifiers,
-            ]}
-          >
-            Audio
-          </Text>
-        </HStack>
-      ) : showCompactCount ? (
-        <ZStack
-          modifiers={[
-            frame({ width: 28, height: 28 }),
-            accessibilityElement("ignore"),
-            accessibilityLabel(agentsLabel),
-            ...linkModifiers,
-          ]}
-        >
-          <Circle modifiers={[foregroundStyle(tint)]} />
-          <Text
-            modifiers={[
-              font({ weight: "bold", size: 14 }),
-              foregroundStyle("#000000"),
-              lineLimit(1),
-              minimumScaleFactor(0.75),
-              frame({ width: 24, height: 28 }),
-            ]}
-          >
-            {compactCountLabel}
-          </Text>
-        </ZStack>
-      ) : (
         <Text
-          modifiers={[
-            font({ weight: "semibold", size: 11 }),
-            foregroundStyle(tint),
-            lineLimit(1),
-            minimumScaleFactor(0.5),
-            ...linkModifiers,
-          ]}
+          modifiers={[font({ weight: "semibold", size: 11 }), foregroundStyle(tint), ...linkModifiers]}
         >
-          {attentionRow
-            ? attentionRow.phase === "waiting_for_approval"
-              ? "Approval"
-              : "Input"
-            : activeLabel}
+          Audio
         </Text>
-      ),
-    // The shared/minimal form is a ~22pt circle — a single signal reads there,
-    // the wordmark does not. Show the blocking/outcome phase glyph, else the
-    // mark (all-done shows the hero row's checkmark/cross).
+      ) : showCompactGlyph ? (
+      <HStack
+        modifiers={[
+          padding({ trailing: 2 }),
+          accessibilityElement("ignore"),
+          accessibilityLabel(agentsLabel),
+          ...linkModifiers,
+        ]}
+      >
+        {renderGlyph(phaseSymbol(heroRow?.phase ?? "running"), 14, tint)}
+      </HStack>
+    ) : (
+      <Text
+        modifiers={[
+          font({ weight: "semibold", size: 11 }),
+          foregroundStyle(tint),
+          lineLimit(1),
+          minimumScaleFactor(0.5),
+          ...linkModifiers,
+        ]}
+      >
+        {attentionRow
+          ? attentionRow.phase === "waiting_for_approval"
+            ? "Approval"
+            : "Input"
+          : failedRow
+            ? "Failed"
+            : activeLabel}
+      </Text>
+    ),
     minimal: hasAudioActive
       ? renderGlyph("speaker.wave.2.fill", 13, isLightScheme ? "#059669" : "#34d399", linkModifiers)
-      : (attentionRow || failedRow || allDone) && heroRow
-        ? renderGlyph(phaseSymbol(heroRow.phase), 13, phaseTint(heroRow.phase), linkModifiers)
-        : renderLogo(11, tint, linkModifiers),
+      : heroRow
+      ? renderGlyph(phaseSymbol(heroRow.phase), 13, phaseTint(heroRow.phase), linkModifiers)
+      : renderLogo(11, tint, linkModifiers),
     expandedLeading: (
       <HStack spacing={5} alignment="center" modifiers={[padding({ leading: 4, vertical: 4 })]}>
         {renderLogo(15, tint)}

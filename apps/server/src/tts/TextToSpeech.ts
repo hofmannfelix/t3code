@@ -1,7 +1,7 @@
 import { TtsError } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as HttpClient from "effect/http/HttpClient";
@@ -95,7 +95,7 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const http = yield* HttpClient.HttpClient;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const config = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -343,7 +343,7 @@ const make = Effect.gen(function* () {
     readonly bytes: Uint8Array;
     readonly mimeType: string;
   }) {
-    const token = yield* crypto.randomUUIDv4.pipe(
+    const token = yield* random.uuidV4().pipe(
       Effect.mapError(
         () =>
           new TtsError({

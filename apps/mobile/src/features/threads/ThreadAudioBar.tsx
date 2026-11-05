@@ -15,9 +15,9 @@ import { FullWindowOverlay } from "react-native-screens";
 import * as Option from "effect/Option";
 
 import { SymbolView } from "../../components/ui/AppSymbol";
-import { appNavigationRef } from "../../lib/appNavigation";
+import { rootNavigationRef } from "../../lib/rootNavigation";
 import { gatherMessageTurnParts } from "../../lib/threadActivity";
-import { useThreadDetail } from "../../state/use-thread-detail";
+import { useEnvironmentThread } from "../../state/threads";
 import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
@@ -192,8 +192,8 @@ export function ThreadAudioBar(props?: {
   const targetProjectTitle = speech.projectTitle ?? activeTarget?.projectTitle ?? "T3 Code";
 
   const handleNavigateToThread = () => {
-    if (targetEnvId && targetThreadId && appNavigationRef.isReady()) {
-      appNavigationRef.navigate("Thread", {
+    if (targetEnvId && targetThreadId && rootNavigationRef.isReady()) {
+      rootNavigationRef.navigate("Thread", {
         environmentId: targetEnvId,
         threadId: targetThreadId,
       });
@@ -352,7 +352,7 @@ function ArmedThreadAudioWatcher(props: { readonly target: ArmedReadAloudTarget 
     }),
     [target.environmentId, target.threadId],
   );
-  const threadDetailState = useThreadDetail(targetSpec);
+  const threadDetailState = useEnvironmentThread(targetSpec.environmentId, targetSpec.threadId);
 
   const seenStreamingIdsRef = useRef<Set<string>>(new Set());
   const initialLoadHandledRef = useRef<boolean>(false);
@@ -447,7 +447,7 @@ function CompletedReplyAnnouncer(props: {
     () => ({ environmentId: reply.environmentId, threadId: reply.threadId }),
     [reply.environmentId, reply.threadId],
   );
-  const threadDetailState = useThreadDetail(targetSpec);
+  const threadDetailState = useEnvironmentThread(targetSpec.environmentId, targetSpec.threadId);
 
   useEffect(() => {
     if (threadDetailState.status === "deleted") {

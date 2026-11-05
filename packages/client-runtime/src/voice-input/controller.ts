@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { replaceTextRange } from "@t3tools/shared/composerTrigger";
 
 import {
@@ -5,6 +6,8 @@ import {
   type PreparedVoiceTranscription,
   type VoiceTranscriber,
 } from "./transcription.ts";
+
+const isVoiceTranscriptionError = Schema.is(VoiceTranscriptionError);
 
 export const VOICE_RECORDING_LIMIT_SECONDS = 5 * 60;
 
@@ -38,7 +41,7 @@ export type VoiceRecorderStatus = {
 
 export interface VoiceRecorder {
   readonly uri: string | null;
-  prepareToRecordAsync(): Promise<void>;
+  prepareToRecordAsync(signal?: AbortSignal): Promise<void>;
   record(options: { readonly forDuration: number }): void;
   stop(): Promise<void>;
 }
@@ -166,7 +169,7 @@ function errorCode(error: unknown): string | null {
 
 /** Transcription errors carry a user-facing reason; only fall back when one is missing. */
 function voiceTranscriptionDetail(error: unknown): string | null {
-  if (!(error instanceof VoiceTranscriptionError)) return null;
+  if (!isVoiceTranscriptionError(error)) return null;
   const message = error.message.trim();
   return message.length > 0 ? message : null;
 }
@@ -278,7 +281,7 @@ export class VoiceInputController {
       await this.dependencies.configureRecording();
       this.recordingConfigured = true;
       if (!this.isCurrent(operationToken)) return;
-      await this.dependencies.recorder.prepareToRecordAsync();
+      await this.dependencies.recorder.prepareToRecordAsync(abortController.signal);
       if (!this.isCurrent(operationToken)) return;
       this.recordingUri = this.dependencies.recorder.uri;
       this.rememberRecordingUri(this.recordingUri);
@@ -538,12 +541,7 @@ export class VoiceInputController {
         ? { phase: "error", error, errorAction: "retry" }
         : { phase: "idle", error: null, errorAction: null },
     );
-    try {
-      await this.dependencies.recorder.stop();
-    } catch {
-    } finally {
-      await this.releaseResources();
-    }
+    await this.releaseResources();
   }
 
   private async releaseResources(preserveRetryable = false): Promise<void> {
@@ -551,6 +549,11 @@ export class VoiceInputController {
     try {
       this.rememberRecordingUri(this.dependencies.recorder.uri);
     } catch {}
+    if (this.recordingConfigured) {
+      try {
+        await this.dependencies.recorder.stop();
+      } catch {}
+    }
     this.recordingUri = null;
     for (const uri of this.ownedRecordingUris) {
       if (preserveRetryable && this.retryableRecording?.recordingUri === uri) {
