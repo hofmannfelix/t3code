@@ -176,4 +176,27 @@ describe("createLazyVoiceRecorder", () => {
 
     expect(resolved).toEqual([{ uid: "airpods", name: "AirPods", type: "BluetoothHFP" }]);
   });
+
+  it("still records when iOS reads the input synchronously or cannot read it", async () => {
+    const builtIn = { uid: "builtin", name: "iPhone Microphone", type: "MicrophoneBuiltIn" };
+    const resolved: Array<VoiceRecordingInput | null> = [];
+    // Expo types getCurrentInput as a Promise, but the iOS binding returns or throws synchronously.
+    for (const getCurrentInput of [
+      () => builtIn as unknown as Promise<VoiceRecordingInput>,
+      (): Promise<VoiceRecordingInput> => {
+        throw new Error("No input found");
+      },
+    ]) {
+      const recorder = createLazyVoiceRecorder({
+        create: () => Object.assign(createNativeRecorder("file:///voice.m4a"), { getCurrentInput }),
+        onStatus: () => {},
+        selectInput: (inputs) => inputs[0] ?? null,
+        onInputResolved: (input) => resolved.push(input),
+      });
+      await expect(recorder.prepareToRecordAsync()).resolves.toBeUndefined();
+    }
+    await Promise.resolve();
+
+    expect(resolved).toEqual([builtIn, null]);
+  });
 });

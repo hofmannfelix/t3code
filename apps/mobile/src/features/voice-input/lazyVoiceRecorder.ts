@@ -68,9 +68,13 @@ export function createLazyVoiceRecorder<TStatus, TRecorderState>(input: {
       const reportInput = () => {
         const report = input.onInputResolved;
         if (!report) return;
-        const current = prepared.getCurrentInput?.();
-        if (!current) return report(null);
-        void current.then(report, () => report(null));
+        const read = prepared.getCurrentInput;
+        if (!read) return report(null);
+        // Expo types this as a Promise, but the iOS binding returns or throws synchronously.
+        void new Promise<VoiceRecordingInput>((resolve) => resolve(read.call(prepared))).then(
+          report,
+          () => report(null),
+        );
       };
       const selectInput = async () => {
         if (!input.selectInput) return;
