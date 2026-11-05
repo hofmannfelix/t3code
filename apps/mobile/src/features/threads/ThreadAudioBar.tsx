@@ -149,7 +149,7 @@ export function ThreadAudioBar(props?: {
   const defaultTop = insets.top + (Platform.OS === "ios" ? 44 : 56) + 8;
   const top = props?.top ?? defaultTop;
 
-  const { speech, pause, resume, seekBy, stop, skipNext, skipPrevious } = useReadAloud(
+  const { speech, pause, resume, seekBy, stop, stopAnswer, skipNext, skipPrevious } = useReadAloud(
     props?.environmentId,
   );
   const isSessionActive = useIsAudioSessionActive();
@@ -313,6 +313,28 @@ export function ThreadAudioBar(props?: {
               />
             )}
           </Pressable>
+
+          {/* Stop this answer but keep the session: the next reply plays as it arrives. */}
+          {isPlaying || isPaused || isLoading ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Antwort stoppen"
+              accessibilityHint="Beendet diese Antwort und wartet auf die nächste"
+              hitSlop={6}
+              onPress={() => {
+                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                stopAnswer();
+              }}
+              className="size-8 items-center justify-center rounded-full active:bg-foreground/10"
+            >
+              <SymbolView
+                name="stop.fill"
+                size={13}
+                tintColorClassName="accent-foreground"
+                type="monochrome"
+              />
+            </Pressable>
+          ) : null}
 
           {/* +10 seconds */}
           <Pressable

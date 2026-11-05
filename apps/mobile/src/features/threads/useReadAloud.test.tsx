@@ -286,6 +286,7 @@ function renderReadAloud() {
     stop: () => current.stop,
     enqueue: () => current.enqueue,
     skipNext: () => current.skipNext,
+    stopAnswer: () => current.stopAnswer,
     skipPrevious: () => current.skipPrevious,
   };
 }
@@ -416,6 +417,43 @@ describe("useReadAloud", () => {
     });
     await flush();
     expect(view.speech()).toMatchObject({ key: null, phase: null });
+  });
+
+  it("stopping a paused answer drops it, and the next reply plays as soon as it arrives", async () => {
+    const view = renderReadAloud();
+    await act(async () => {
+      view.enqueue()({ key: "msg-stop-a", text: "Antwort A.", threadId: "thread-stop" });
+    });
+    await flush();
+    act(() => {
+      harness.players[0]!.emit({ isLoaded: true, playing: true });
+    });
+    act(() => {
+      view.pause()();
+    });
+    expect(view.speech()).toMatchObject({ key: "msg-stop-a", phase: "paused" });
+
+    await act(async () => {
+      view.stopAnswer()();
+    });
+    await flush();
+    expect(harness.players[0]!.release).toHaveBeenCalled();
+    expect(view.speech()).toMatchObject({ key: null, phase: null });
+
+    await act(async () => {
+      view.enqueue()({ key: "msg-stop-b", text: "Antwort B.", threadId: "thread-stop" });
+    });
+    await flush();
+    const next = harness.players.at(-1)!;
+    act(() => {
+      next.emit({ isLoaded: true });
+    });
+    expect(next.play).toHaveBeenCalled();
+    expect(view.speech()).toMatchObject({ key: "msg-stop-b" });
+
+    act(() => {
+      view.stop()();
+    });
   });
 
   it("skips to the next answer, and back to the previous one with the skipped answer after it", async () => {

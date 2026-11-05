@@ -1421,6 +1421,20 @@ export const skipToNextAnswer = () => {
 };
 
 /**
+ * Drops the current answer, paused or not, and keeps the session: the next queued answer
+ * plays, otherwise it waits for the next reply. Stopping releases a manual pause, since the
+ * paused answer is gone; during a recording the session resumes waiting once the mic is off.
+ */
+export const stopCurrentAnswer = () => {
+  log("stopCurrentAnswer called, queued blocks:", answerBlockQueue.length);
+  if (currentAnswerBlock === null) return;
+  isUserPausedState = false;
+  if (pausedByVoiceInput !== null) pausedByVoiceInput = "waiting";
+  haltCurrentAnswerAudio();
+  finishCurrentAnswerBlock();
+};
+
+/**
  * Podcast-style back: a few seconds into an answer it restarts that answer,
  * at its start it replays the previous one and queues the current answer
  * right after it.
@@ -2220,6 +2234,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
     stop,
     enqueue,
     skipNext: skipToNextAnswer,
+    stopAnswer: stopCurrentAnswer,
     skipPrevious: skipToPreviousAnswer,
   };
 }

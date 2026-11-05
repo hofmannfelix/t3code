@@ -20,6 +20,12 @@ with the same voices. When the provider is unreachable, T3 Code falls back to
 the device voices for that message. If even those cannot play, a toast says so
 instead of staying silent.
 
+## Stopping one answer on mobile
+
+The stop button in the audio bar ends the answer that is playing or paused, but keeps
+audio on: the next queued answer starts, or the bar goes back to waiting and plays the
+next reply as soon as it arrives. The close button ends audio altogether.
+
 ## Short updates on mobile
 
 In the mobile app, the audio bar shows a **Kurz** switch while it plays or waits for
