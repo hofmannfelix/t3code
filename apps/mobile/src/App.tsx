@@ -76,7 +76,7 @@ import { installUiRuntimeMemoryWarningGc } from "./lib/useUiRuntimeMemoryWarning
 import { SubscriptionUsageCoordinator } from "./widgets/SubscriptionUsageCoordinator";
 import { installSubscriptionUsageRefresh } from "./widgets/useSubscriptionUsage";
 import { GlobalVoiceInputControl } from "./features/voice-input/GlobalVoiceInputControl";
-import { GlobalAudioPlayerControl } from "./features/threads/ThreadAudioBar";
+import { GlobalAudioPlayerControl, setAudioBarRoute } from "./features/threads/ThreadAudioBar";
 import { restoreSettingsLinkState } from "./features/settings/settings-navigation";
 import {
   hydrateWorkspaceSelections,
@@ -162,6 +162,7 @@ const Navigation = createStaticNavigation(RootStack);
 
 function handleNavigationStateChange(state: NavigationState | undefined): void {
   recordWorkspaceSelections(state);
+  setAudioBarRoute(rootNavigationRef.getCurrentRoute()?.name);
   presentPendingIncomingShare();
   resolvePendingNewTaskPromptLink(state);
   resolvePendingThreadPromptLink(state);

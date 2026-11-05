@@ -1,6 +1,6 @@
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Haptics from "expo-haptics";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ActivityIndicator, Platform, Pressable, Text, View } from "react-native";
 import Animated, {
   FadeIn,
@@ -39,6 +39,26 @@ import {
   stopGlobalAudioSession,
   type ArmedReadAloudTarget,
 } from "./useReadAloud";
+
+/** The bar floats over the thread list and threads only; elsewhere (Settings, sheets) it covers content. */
+const AUDIO_BAR_ROUTES: ReadonlySet<string> = new Set(["Home", "Thread"]);
+let audioBarRouteAllowed = true;
+const audioBarRouteListeners = new Set<() => void>();
+
+/** Called with the focused root route whenever navigation state changes. */
+export function setAudioBarRoute(routeName: string | undefined): void {
+  const allowed = routeName === undefined || AUDIO_BAR_ROUTES.has(routeName);
+  if (allowed === audioBarRouteAllowed) return;
+  audioBarRouteAllowed = allowed;
+  for (const listener of audioBarRouteListeners) listener();
+}
+
+const subscribeAudioBarRoute = (listener: () => void) => {
+  audioBarRouteListeners.add(listener);
+  return () => {
+    audioBarRouteListeners.delete(listener);
+  };
+};
 
 const AUDIO_BAR_ENTERING = FadeInUp.duration(200).reduceMotion(ReduceMotion.System);
 const AUDIO_BAR_EXITING = FadeOutUp.duration(160).reduceMotion(ReduceMotion.System);
@@ -210,14 +230,14 @@ export function ThreadAudioBar(props?: {
       className="absolute left-3 right-3 z-50 items-center"
       style={{ top }}
     >
-      <View className="w-full max-w-md flex-row items-center justify-between rounded-full border border-border bg-card px-3.5 py-1.5 shadow-xl shadow-black/25">
+      <View className="w-full max-w-md flex-row items-center justify-between rounded-full border border-border bg-card px-3 py-2 shadow-xl shadow-black/25">
         {/* Left status / speaker indicator (tappable to jump to thread) */}
         <Pressable
           disabled={!canNavigate}
           onPress={handleNavigateToThread}
           accessibilityRole={canNavigate ? "button" : undefined}
           accessibilityLabel={canNavigate ? "Zur aktiven Konversation wechseln" : undefined}
-          className="flex-1 flex-row items-center gap-2 pl-1 pr-2 active:opacity-70"
+          className="min-w-0 flex-1 flex-row items-center gap-2 pl-1 pr-3 active:opacity-70"
         >
           <View className="size-6 items-center justify-center rounded-full bg-primary/15">
             <SymbolView
@@ -234,7 +254,7 @@ export function ThreadAudioBar(props?: {
         </Pressable>
 
         {/* Right audio controls: ALWAYS visible on the bar */}
-        <View className="flex-row items-center gap-2.5">
+        <View className="flex-row items-center gap-3">
           {summaryToggle.available ? (
             <Pressable
               accessibilityRole="switch"
@@ -276,7 +296,7 @@ export function ThreadAudioBar(props?: {
               void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
               skipPrevious();
             }}
-            className="size-8 items-center justify-center rounded-full active:bg-foreground/10"
+            className="size-9 items-center justify-center rounded-full active:bg-foreground/10"
           >
             <SymbolView
               name="gobackward.10"
@@ -293,7 +313,7 @@ export function ThreadAudioBar(props?: {
             hitSlop={6}
             disabled={isLoading}
             onPress={handleTogglePlayPause}
-            className="size-8 items-center justify-center rounded-full bg-primary active:opacity-75"
+            className="size-9 items-center justify-center rounded-full bg-primary active:opacity-75"
           >
             {isLoading ? (
               <ActivityIndicator size="small" color="#ffffff" />
@@ -325,7 +345,7 @@ export function ThreadAudioBar(props?: {
                 void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
                 stopAnswer();
               }}
-              className="size-8 items-center justify-center rounded-full active:bg-foreground/10"
+              className="size-9 items-center justify-center rounded-full active:bg-foreground/10"
             >
               <SymbolView
                 name="stop.fill"
@@ -349,7 +369,7 @@ export function ThreadAudioBar(props?: {
               void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
               skipNext();
             }}
-            className="size-8 items-center justify-center rounded-full active:bg-foreground/10"
+            className="size-9 items-center justify-center rounded-full active:bg-foreground/10"
           >
             <SymbolView
               name="goforward.10"
@@ -365,7 +385,7 @@ export function ThreadAudioBar(props?: {
             accessibilityLabel="Audio deaktivieren"
             hitSlop={6}
             onPress={handleStopAndClose}
-            className="size-8 items-center justify-center rounded-full bg-foreground/10 active:opacity-75"
+            className="size-9 items-center justify-center rounded-full bg-foreground/10 active:opacity-75"
           >
             <SymbolView
               name="xmark"
@@ -617,8 +637,13 @@ export function GlobalAudioPlayerControl(props: { readonly children: ReactNode }
     }
   }, [preferences, isSessionActive]);
 
+  const routeAllowed = useSyncExternalStore(
+    subscribeAudioBarRoute,
+    () => audioBarRouteAllowed,
+    () => true,
+  );
   const visible = isSessionActive || speech.phase !== null;
-  const bar = visible ? <ThreadAudioBar /> : null;
+  const bar = visible && routeAllowed ? <ThreadAudioBar /> : null;
 
   return (
     <>
