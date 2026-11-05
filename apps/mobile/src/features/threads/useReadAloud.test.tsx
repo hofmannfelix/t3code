@@ -318,7 +318,7 @@ describe("useReadAloud", () => {
     await flush();
 
     // The short lead and the rest are requested together, not one after another.
-    expect(spokenTexts().map(normalize)).toEqual(["Thread T3 Code: One.", "Two. Three."]);
+    expect(spokenTexts().map(normalize)).toEqual(["T3 Code: One.", "Two. Three."]);
     expect(harness.players).toHaveLength(1);
     expect(harness.downloads[0]!.url).toBe("http://server.test:8923/api/tts-audio/token-1");
     const pl = harness.players[0]!;
@@ -417,7 +417,7 @@ describe("useReadAloud", () => {
     });
     await flush();
     expect(view.speech()).toMatchObject({ key: "msg-skip-a", queued: 1 });
-    expect(normalize(spokenTexts().at(-1)!)).toBe("Thread T3 Code: Antwort A.");
+    expect(normalize(spokenTexts().at(-1)!)).toBe("T3 Code: Antwort A.");
 
     act(() => {
       harness.players.at(-1)!.emit({ isLoaded: true, playing: true, didJustFinish: true });
@@ -473,7 +473,7 @@ describe("useReadAloud", () => {
       view.enqueue()({ ...partTwo, threadId: "thread-parts", turnParts: [partOne, partTwo] });
     });
     await flush();
-    expect(normalize(spokenTexts().at(-1)!)).toBe("Thread T3 Code: Alles erledigt.");
+    expect(normalize(spokenTexts().at(-1)!)).toBe("T3 Code: Alles erledigt.");
 
     act(() => {
       view.stop()();
@@ -497,7 +497,7 @@ describe("useReadAloud", () => {
 
   it("seeks across chunk boundaries as one continuous track", async () => {
     const view = renderReadAloud();
-    // Estimated chunk lengths: "Thread T3 Code: Eins." ≈ 1.4s, the rest ≈ 2.3s.
+    // Estimated chunk lengths: "T3 Code: Eins." ≈ 1.0s, the rest ≈ 2.3s.
     await act(async () => {
       view.speak()({ key: "msg-seek", text: "Eins. Zwei Drei Vier. Fünf." });
     });
@@ -511,7 +511,7 @@ describe("useReadAloud", () => {
       view.seekBy()(1);
     });
     expect(pl.skipTo).toHaveBeenCalledWith(1);
-    expect(pl.seekTo).toHaveBeenLastCalledWith(expect.closeTo(2 - 21 / 14.5, 5));
+    expect(pl.seekTo).toHaveBeenLastCalledWith(expect.closeTo(2 - 14 / 14.5, 5));
 
     act(() => {
       view.seekBy()(-10);
@@ -633,7 +633,7 @@ describe("useReadAloud", () => {
     });
     await flush();
 
-    expect(normalize(spokenTexts()[0]!)).toBe("Thread Super App: Der Build ist fertig.");
+    expect(normalize(spokenTexts()[0]!)).toBe("Super App: Der Build ist fertig.");
 
     act(() => {
       harness.players[0]!.emit({ isLoaded: true, playing: true, didJustFinish: true });
@@ -726,7 +726,7 @@ describe("useReadAloud", () => {
     await flush();
 
     // Both chunks of Thread A synthesize into one playlist
-    expect(spokenTexts().map(normalize)).toEqual(["Thread T3 Code: Sentence A1.", "Sentence A2."]);
+    expect(spokenTexts().map(normalize)).toEqual(["T3 Code: Sentence A1.", "Sentence A2."]);
     expect(view.speech()).toMatchObject({ key: "msg-thread-a", phase: "loading", queued: 0 });
 
     harness.players[0]!.emit({ isLoaded: true });
@@ -756,7 +756,7 @@ describe("useReadAloud", () => {
     await flush();
 
     expect(spokenTexts().slice(2).map(normalize)).toEqual([
-      "Thread T3 Code: Sentence B1.",
+      "T3 Code: Sentence B1.",
       "Sentence B2.",
     ]);
     expect(harness.players).toHaveLength(2);

@@ -28,7 +28,7 @@ final class T3SpeechSynthesizerDelegate: NSObject, AVSpeechSynthesizerDelegate {
     } else {
       T3NativeSpeechSynthesizer.shared.stopBackgroundAudio()
       MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-      try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+      T3NativeSpeechSynthesizer.releaseAudioSession()
       T3NativeSpeechSynthesizer.shared.notifyPhaseChange("idle")
     }
     onFinish()
@@ -39,7 +39,7 @@ final class T3SpeechSynthesizerDelegate: NSObject, AVSpeechSynthesizerDelegate {
     if !T3NativeSpeechSynthesizer.shared.keepSessionActiveOnFinish {
       T3NativeSpeechSynthesizer.shared.stopBackgroundAudio()
       MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-      try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+      T3NativeSpeechSynthesizer.releaseAudioSession()
       T3NativeSpeechSynthesizer.shared.notifyPhaseChange("idle")
     }
     onFinish()
@@ -56,6 +56,31 @@ final class T3SpeechSynthesizerDelegate: NSObject, AVSpeechSynthesizerDelegate {
 
 public final class T3NativeSpeechSynthesizer: NSObject {
   public static let shared = T3NativeSpeechSynthesizer()
+
+  /// Voice input switches the shared session to playAndRecord. Ending read-aloud
+  /// while the mic is live must leave that session alone, or the recorder goes silent.
+  public static var isRecordingSessionActive: Bool {
+    AVAudioSession.sharedInstance().category == .playAndRecord
+  }
+
+  public static func releaseAudioSession() {
+    if isRecordingSessionActive { return }
+    try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+  }
+
+  /// Returns false while recording, so callers skip waiting music as well.
+  @discardableResult
+  public static func activatePlaybackSession() -> Bool {
+    if isRecordingSessionActive { return false }
+    do {
+      let audioSession = AVAudioSession.sharedInstance()
+      try audioSession.setCategory(.playback, mode: .default, options: [])
+      try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+    } catch {
+      NSLog("[T3NativeSpeechSynthesizer] Audio session activation error: \(error)")
+    }
+    return true
+  }
   private let synthesizer = AVSpeechSynthesizer()
   private var activeDelegate: T3SpeechSynthesizerDelegate?
   private var backgroundAudioPlayer: AVAudioPlayer?
@@ -207,13 +232,7 @@ public final class T3NativeSpeechSynthesizer: NSObject {
   }
 
   public func resumeBackgroundAudio() {
-    do {
-      let audioSession = AVAudioSession.sharedInstance()
-      try audioSession.setCategory(.playback, mode: .default, options: [])
-      try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-    } catch {
-      NSLog("[T3NativeSpeechSynthesizer] Audio session resume error: \(error)")
-    }
+    guard T3NativeSpeechSynthesizer.activatePlaybackSession() else { return }
     if backgroundAudioPlayer == nil {
       startBackgroundAudio()
     } else {
@@ -230,15 +249,9 @@ public final class T3NativeSpeechSynthesizer: NSObject {
     self.activeProjectTitle = projectTitle
     self.keepSessionActiveOnFinish = true
 
-    do {
-      let audioSession = AVAudioSession.sharedInstance()
-      try audioSession.setCategory(.playback, mode: .default, options: [])
-      try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-    } catch {
-      NSLog("[T3NativeSpeechSynthesizer] Audio session activation error: \(error)")
+    if T3NativeSpeechSynthesizer.activatePlaybackSession() {
+      startBackgroundAudio()
     }
-
-    startBackgroundAudio()
 
     var nowPlaying = [String: Any]()
     nowPlaying[MPMediaItemPropertyTitle] = "Warte auf Antwort..."
@@ -299,13 +312,7 @@ public final class T3NativeSpeechSynthesizer: NSObject {
     self.activeDelegate = delegate
     synthesizer.delegate = delegate
 
-    do {
-      let audioSession = AVAudioSession.sharedInstance()
-      try audioSession.setCategory(.playback, mode: .default, options: [])
-      try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-    } catch {
-      NSLog("[T3NativeSpeechSynthesizer] Audio session activation error: \(error)")
-    }
+    T3NativeSpeechSynthesizer.activatePlaybackSession()
 
     var nowPlaying = [String: Any]()
     nowPlaying[MPMediaItemPropertyTitle] = title ?? "Antwort"
@@ -328,7 +335,7 @@ public final class T3NativeSpeechSynthesizer: NSObject {
       keepSessionActiveOnFinish = false
       activeProjectTitle = nil
       MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-      try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+      T3NativeSpeechSynthesizer.releaseAudioSession()
     } else if keepSessionActiveOnFinish {
       setupRemoteCommands()
       resumeBackgroundAudio()
@@ -545,7 +552,7 @@ public final class T3NativeControlsModule: Module {
     AsyncFunction("deactivateAudioSession") { (promise: Promise) in
       T3NativeSpeechSynthesizer.shared.stop(forceDeactivate: true)
       MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-      try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+      T3NativeSpeechSynthesizer.releaseAudioSession()
       promise.resolve(true)
     }.runOnQueue(.main)
 

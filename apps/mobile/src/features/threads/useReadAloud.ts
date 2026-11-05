@@ -334,14 +334,12 @@ export function prefixTextWithProject(
   },
 ): string {
   const projectTitle = resolveProjectTitle(options);
-  const expectedPrefix = `Thread ${projectTitle}:`;
+  // Just the name: an English lead word ("Thread") tilts the voice model to English for the whole reply.
+  const expectedPrefix = `${projectTitle}:`;
   const trimmed = text.trim();
-  if (
-    trimmed.startsWith(expectedPrefix) ||
-    trimmed.startsWith(`Thread ${projectTitle}.`) ||
-    trimmed.toLowerCase().startsWith(`thread ${projectTitle.toLowerCase()}:`) ||
-    trimmed.toLowerCase().startsWith(`thread ${projectTitle.toLowerCase()}.`)
-  ) {
+  const lower = trimmed.toLowerCase();
+  const title = projectTitle.toLowerCase();
+  if (lower.startsWith(`${title}:`) || lower.startsWith(`${title}.`)) {
     return text;
   }
   return `${expectedPrefix} ${trimmed}`;
@@ -805,6 +803,8 @@ export const deactivateAudioSession = async () => {
       await T3NativeControls.deactivateAudioSession();
     }
   } catch {}
+  // The recorder shares this session; it releases it itself when recording ends.
+  if (isVoiceRecordingActive) return;
   try {
     await setIsAudioActiveAsync(false);
   } catch {}
@@ -851,7 +851,7 @@ export const stopAllSpeech = () => stopCurrent();
 const stopCurrent = () => {
   runCounter += 1;
   isUserPausedState = false;
-  isVoiceRecordingActive = false;
+  // isVoiceRecordingActive belongs to the recorder; stopping playback mid-recording must not clear it.
   pausedByVoiceInput = null;
   activeStreamAbort?.abort();
   activeStreamAbort = null;
@@ -876,7 +876,6 @@ const announceExhausted = (message: string) => {
   }
   answerBlockQueue = [];
   currentAnswerBlock = null;
-  isVoiceRecordingActive = false;
   pausedByVoiceInput = null;
   cleanupActiveSegments();
   releasePlaylist();
@@ -1130,6 +1129,10 @@ export const resumeAudioAfterVoiceRecording = async () => {
   pausedByVoiceInput = null;
   isVoiceRecordingActive = false;
 
+  // The session may have been ended during recording; nothing is left to resume then.
+  if (!isAudioSessionActive && currentAnswerBlock === null && answerBlockQueue.length === 0) {
+    return;
+  }
   await ensureAudioSession();
 
   if (previousState === "speech") {
