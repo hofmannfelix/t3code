@@ -19,3 +19,25 @@ key is stored on the server, so every device connected to that server reads
 with the same voices. When the provider is unreachable, T3 Code falls back to
 the device voices for that message. If even those cannot play, a toast says so
 instead of staying silent.
+
+## Short updates on mobile
+
+In the mobile app, the audio bar shows a **Kurz** switch while it plays or waits for
+a thread. Turn it on, and that thread's automatic replies are read as a one- or
+two-sentence spoken summary. Tapping the speaker on a message still reads it in
+full. The summary uses the read-aloud provider's key: Gemini on the device, or the
+server's provider (Gemini or OpenAI). If the summary cannot be made in time, the
+full reply is read instead.
+
+## Spoken language
+
+Under Settings → Voice & read aloud → Spoken language, choose **Deutsch** or
+**English** to steer the voice toward that language. It is a hint, not a lock:
+passages clearly in another language keep their own pronunciation. With
+**Automatic**, the voice follows each reply's text.
+
+## Which microphone records
+
+While you dictate, the composer shows the name of the microphone that is
+recording. To prefer the iPhone microphone over a connected headset, move it to the
+top of Settings → Microphone.

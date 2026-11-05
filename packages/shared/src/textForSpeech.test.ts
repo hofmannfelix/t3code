@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { cleanTextForSpeech } from "./textForSpeech.ts";
+import { cleanTextForSpeech, withSpeechLanguageDirection } from "./textForSpeech.ts";
 
 describe("cleanTextForSpeech", () => {
   it("returns empty string when input is empty or nullish", () => {
@@ -85,5 +85,17 @@ Die Renderings mit den schlanken **12 mm** Maßen und den erhaltenen **2 mm Inne
     expect(cleaned).toContain("Gesamt-Assembly mit 12 mm Stärke am Träger");
     expect(cleaned).toContain("bereit für den Export/Druck");
     expect(cleaned.startsWith("Die Platten- und Wandstärke wurde in params.scad")).toBe(true);
+  });
+});
+
+describe("withSpeechLanguageDirection", () => {
+  it("leaves the text alone without a hint, so the voice follows the text", () => {
+    expect(withSpeechLanguageDirection("Build passed.", undefined)).toBe("Build passed.");
+  });
+
+  it("leads with a direction in the hinted language", () => {
+    const spoken = withSpeechLanguageDirection("Build passed.", "de");
+    expect(spoken.startsWith("Lies den folgenden Text auf Deutsch vor.")).toBe(true);
+    expect(spoken.endsWith("\n\nBuild passed.")).toBe(true);
   });
 });

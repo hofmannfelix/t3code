@@ -370,6 +370,8 @@ export function ComposerDictationStatus(props: {
   readonly elapsedSeconds: number;
   readonly phase: VoiceInputPhase;
   readonly presentation: VoiceComposerPresentation;
+  /** The microphone the recording uses, so a connected headset is never a surprise. */
+  readonly microphoneName?: string | null;
 }) {
   const recording = props.phase === "recording";
   const waveformStyle = useAnimatedStyle(() => ({
@@ -394,6 +396,19 @@ export function ComposerDictationStatus(props: {
         >
           <VoiceWaveform audioLevels={props.audioLevels} />
           <DictationElapsedTime className="text-foreground-muted" seconds={props.elapsedSeconds} />
+          {props.microphoneName ? (
+            <View className="min-w-0 shrink flex-row items-center gap-1">
+              <SymbolView
+                name="mic"
+                size={11}
+                tintColorClassName="accent-icon-muted"
+                type="monochrome"
+              />
+              <Text className="shrink text-xs text-foreground-muted" numberOfLines={1}>
+                {props.microphoneName}
+              </Text>
+            </View>
+          ) : null}
         </Animated.View>
         <Animated.View className="absolute inset-0 justify-center px-2" style={labelStyle}>
           <Text className="text-center text-sm text-foreground-muted" numberOfLines={1}>

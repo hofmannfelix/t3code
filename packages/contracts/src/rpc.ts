@@ -514,6 +514,7 @@ export const WS_METHODS = {
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverUpdateSettings: "server.updateSettings",
   serverTtsSynthesize: "server.ttsSynthesize",
+  serverTtsSummarize: "server.ttsSummarize",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
@@ -839,13 +840,29 @@ export class TtsError extends Schema.TaggedError<TtsError>()("TtsError", {
   message: Schema.String,
 }) {}
 
+/** A preferred spoken language; voices that take a direction lean toward it. */
+const TtsLanguageHint = Schema.Literals(["de", "en"]);
+
 const WsServerTtsSynthesizeRpc = Rpc.make(WS_METHODS.serverTtsSynthesize, {
-  payload: Schema.Struct({ text: TrimmedNonEmptyString }),
+  payload: Schema.Struct({
+    text: TrimmedNonEmptyString,
+    languageHint: Schema.optionalKey(TtsLanguageHint),
+  }),
   /** A server-relative audio URL resolved against the environment's HTTP origin, like asset URLs. */
   success: Schema.Struct({
     relativeUrl: Schema.String,
     expiresAt: Schema.Number,
   }),
+  error: Schema.Union([TtsError, EnvironmentAuthorizationError]),
+});
+
+/** Condenses an agent reply into a short spoken update with the read-aloud provider's key. */
+const WsServerTtsSummarizeRpc = Rpc.make(WS_METHODS.serverTtsSummarize, {
+  payload: Schema.Struct({
+    text: TrimmedNonEmptyString,
+    languageHint: Schema.optionalKey(TtsLanguageHint),
+  }),
+  success: Schema.Struct({ text: Schema.String }),
   error: Schema.Union([TtsError, EnvironmentAuthorizationError]),
 });
 
@@ -2044,6 +2061,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetDatabaseStorageRpc,
   WsServerUpdateSettingsRpc,
   WsServerTtsSynthesizeRpc,
+  WsServerTtsSummarizeRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,

@@ -229,4 +229,71 @@ describe("TextToSpeech", () => {
       assert.deepStrictEqual(result.failure.reason, "provider-failed");
     }).pipe(Effect.provide(makeTestLayer({ storedKey: "sk-test", status: 401 }))),
   );
+
+  it.effect("leads a gemini request with the hinted language's direction", () => {
+    const recorded: Array<RecordedRequest> = [];
+    const responseBody = JSON.stringify({
+      candidates: [
+        { content: { parts: [{ inlineData: { data: "AQIDBA==", mimeType: "audio/wav" } }] } },
+      ],
+    });
+    return Effect.gen(function* () {
+      const service = yield* TextToSpeech.TextToSpeech;
+      yield* service.synthesize({ text: "Build passed.", languageHint: "de" });
+      const spoken = JSON.parse(recorded[0]!.body).contents[0].parts[0].text as string;
+      assert.ok(spoken.startsWith("Lies den folgenden Text auf Deutsch vor."));
+      assert.ok(spoken.endsWith("Build passed."));
+    }).pipe(
+      Effect.provide(
+        makeTestLayer({
+          storedKey: "sk-test",
+          tts: { provider: "gemini" },
+          recorded,
+          responseBody,
+        }),
+      ),
+    );
+  });
+
+  it.effect("summarizes with a gemini text model in the hinted language", () => {
+    const recorded: Array<RecordedRequest> = [];
+    const responseBody = JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "Der Build ist grün. " }] } }],
+    });
+    return Effect.gen(function* () {
+      const service = yield* TextToSpeech.TextToSpeech;
+      const result = yield* service.summarize({ text: "Long reply", languageHint: "de" });
+      assert.strictEqual(result.text, "Der Build ist grün.");
+      assert.strictEqual(
+        recorded[0]!.url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent",
+      );
+      const body = JSON.parse(recorded[0]!.body);
+      assert.ok(body.systemInstruction.parts[0].text.endsWith("Answer in German."));
+      assert.strictEqual(body.contents[0].parts[0].text, "Long reply");
+    }).pipe(
+      Effect.provide(
+        makeTestLayer({
+          storedKey: "sk-test",
+          tts: { provider: "gemini" },
+          recorded,
+          responseBody,
+        }),
+      ),
+    );
+  });
+
+  it.effect("summarizes through chat completions on OpenAI-compatible providers", () => {
+    const recorded: Array<RecordedRequest> = [];
+    const responseBody = JSON.stringify({
+      choices: [{ message: { content: "Tests pass; nothing needs you." } }],
+    });
+    return Effect.gen(function* () {
+      const service = yield* TextToSpeech.TextToSpeech;
+      const result = yield* service.summarize({ text: "Long reply" });
+      assert.strictEqual(result.text, "Tests pass; nothing needs you.");
+      assert.strictEqual(recorded[0]!.url, "https://api.openai.com/v1/chat/completions");
+      assert.strictEqual(JSON.parse(recorded[0]!.body).model, "gpt-4o-mini");
+    }).pipe(Effect.provide(makeTestLayer({ storedKey: "sk-test", recorded, responseBody })));
+  });
 });

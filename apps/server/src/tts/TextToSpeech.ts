@@ -16,7 +16,13 @@ import * as ServerConfig from "../config.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { isSecretRedacted, TTS_API_KEY_SECRET_NAME } from "../serverSettings.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
+import {
+  cleanTextForSpeech,
+  speechLanguageDirection,
+  speechSummaryInstructions,
+  withSpeechLanguageDirection,
+  type SpeechLanguageHint,
+} from "@t3tools/shared/textForSpeech";
 
 /**
  * OpenAI-compatible defaults, applied when the settings fields are empty so a
@@ -36,6 +42,12 @@ const GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1bet
 const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash-preview-tts";
 const GEMINI_DEFAULT_VOICE = "Kore";
 
+/** Text models for the short spoken update; they reuse the read-aloud provider's key. */
+const GEMINI_SUMMARY_MODEL = "gemini-flash-lite-latest";
+const OPENAI_SUMMARY_MODEL = "gpt-4o-mini";
+/** Long replies are cut before summarizing; the opening carries what the update needs. */
+const MAX_SUMMARY_INPUT_CHARS = 12_000;
+
 /** Clips are replayable until they expire, then dropped lazily on the next use. */
 const CLIP_TTL_MS = 10 * 60_000;
 const MAX_CACHED_CLIPS = 32;
@@ -51,7 +63,13 @@ export class TextToSpeech extends Context.Service<
     /** Synthesize `text` to speech, served back through a short-lived server-relative URL. */
     readonly synthesize: (input: {
       readonly text: string;
+      readonly languageHint?: SpeechLanguageHint;
     }) => Effect.Effect<{ readonly relativeUrl: string; readonly expiresAt: number }, TtsError>;
+    /** A one- or two-sentence spoken update for an agent reply. */
+    readonly summarize: (input: {
+      readonly text: string;
+      readonly languageHint?: SpeechLanguageHint;
+    }) => Effect.Effect<{ readonly text: string }, TtsError>;
     /** The cached clip behind a synthesize URL, `none` for unknown or expired tokens. */
     readonly clip: (token: string) => Effect.Effect<Option.Option<TtsClip>>;
   }
@@ -77,19 +95,20 @@ const pcmToWav = (pcm: Uint8Array, sampleRate: number, channels = 1, bitsPerSamp
 };
 
 /** Google 429 bodies carry RetryInfo with a delay like "26s". */
-const retryDelayFromResponse = (response: HttpClientResponse.HttpClientResponse) =>
-  Effect.gen(function* () {
-    const body = (yield* response.json.pipe(Effect.orElseSucceed(() => ({})))) as {
-      error?: {
-        details?: Array<{ "@type"?: string; retryDelay?: string }>;
-      };
+const retryDelayFromResponse = Effect.fn("TextToSpeech.retryDelayFromResponse")(function* (
+  response: HttpClientResponse.HttpClientResponse,
+) {
+  const body = (yield* response.json.pipe(Effect.orElseSucceed(() => ({})))) as {
+    error?: {
+      details?: Array<{ "@type"?: string; retryDelay?: string }>;
     };
-    const retryInfo = body.error?.details?.find((detail) =>
-      (detail["@type"] ?? "").endsWith("RetryInfo"),
-    );
-    const seconds = Number.parseFloat(retryInfo?.retryDelay?.replace("s", "") ?? "0");
-    return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : 0;
-  });
+  };
+  const retryInfo = body.error?.details?.find((detail) =>
+    (detail["@type"] ?? "").endsWith("RetryInfo"),
+  );
+  const seconds = Number.parseFloat(retryInfo?.retryDelay?.replace("s", "") ?? "0");
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : 0;
+});
 
 const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -150,7 +169,7 @@ const make = Effect.gen(function* () {
     // The store move can be pending when the key was hand-edited into settings.json.
     const inline = yield* serverSettings.getSettings.pipe(
       Effect.map((settings) => settings.tts.apiKey),
-      Effect.catch(() => Effect.succeed("")),
+      Effect.orElseSucceed(() => ""),
     );
     return inline.length > 0 && !isSecretRedacted(inline) ? inline : "";
   });
@@ -194,13 +213,12 @@ const make = Effect.gen(function* () {
       );
       const response = yield* http.execute(request).pipe(
         Effect.timeout("30 seconds"),
-        Effect.catch(() =>
-          Effect.fail(
+        Effect.mapError(
+          () =>
             new TtsError({
               reason: "provider-failed",
               message: "The text-to-speech provider could not be reached.",
             }),
-          ),
         ),
       );
       if (response.status === 429 && attempt < MAX_ATTEMPTS) {
@@ -217,13 +235,12 @@ const make = Effect.gen(function* () {
         });
       }
       const json = yield* response.json.pipe(
-        Effect.catch(() =>
-          Effect.fail(
+        Effect.mapError(
+          () =>
             new TtsError({
               reason: "provider-failed",
               message: "The text-to-speech provider returned an unreadable response.",
             }),
-          ),
         ),
       );
       const inlineData = (
@@ -251,6 +268,7 @@ const make = Effect.gen(function* () {
 
   const synthesize = Effect.fn("TextToSpeech.synthesize")(function* (input: {
     readonly text: string;
+    readonly languageHint?: SpeechLanguageHint;
   }) {
     const text = cleanTextForSpeech(input.text);
     if (text.length === 0) {
@@ -278,7 +296,7 @@ const make = Effect.gen(function* () {
     const provider = settings.tts.provider.trim();
     if (provider === "gemini") {
       const gemini = yield* synthesizeWithGemini({
-        text,
+        text: withSpeechLanguageDirection(text, input.languageHint),
         baseUrl: settings.tts.baseUrl.trim() || GEMINI_DEFAULT_BASE_URL,
         model: settings.tts.model.trim() || GEMINI_DEFAULT_MODEL,
         voice: settings.tts.voice.trim() || GEMINI_DEFAULT_VOICE,
@@ -299,6 +317,10 @@ const make = Effect.gen(function* () {
         voice,
         input: text,
         response_format: "mp3",
+        // Only the gpt-4o voices take a style direction; tts-1 reads the text as written.
+        ...(model.startsWith("gpt-4o") && input.languageHint
+          ? { instructions: speechLanguageDirection(input.languageHint) }
+          : {}),
       }),
       Effect.mapError(
         () =>
@@ -310,13 +332,12 @@ const make = Effect.gen(function* () {
     );
     const response = yield* http.execute(request).pipe(
       Effect.timeout("30 seconds"),
-      Effect.catch(() =>
-        Effect.fail(
+      Effect.mapError(
+        () =>
           new TtsError({
             reason: "provider-failed",
             message: "The text-to-speech provider could not be reached.",
           }),
-        ),
       ),
     );
     if (response.status !== 200) {
@@ -326,17 +347,85 @@ const make = Effect.gen(function* () {
       });
     }
     const bytes = yield* Effect.map(response.arrayBuffer, (buffer) => new Uint8Array(buffer)).pipe(
-      Effect.catch(() =>
-        Effect.fail(
+      Effect.mapError(
+        () =>
           new TtsError({
             reason: "provider-failed",
             message: "The text-to-speech provider returned an unreadable response.",
           }),
-        ),
       ),
     );
 
     return yield* storeClip({ bytes, mimeType: "audio/mpeg" });
+  });
+
+  const summarizeFailed = (message: string) => new TtsError({ reason: "provider-failed", message });
+
+  const summarize = Effect.fn("TextToSpeech.summarize")(function* (input: {
+    readonly text: string;
+    readonly languageHint?: SpeechLanguageHint;
+  }) {
+    const reply = input.text.trim().slice(0, MAX_SUMMARY_INPUT_CHARS);
+    if (reply.length === 0) return yield* summarizeFailed("The reply to summarize is empty.");
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(() => summarizeFailed("The text-to-speech settings could not be read.")),
+    );
+    const apiKey = yield* resolveApiKey;
+    if (apiKey.length === 0) {
+      return yield* new TtsError({
+        reason: "not-configured",
+        message: "No text-to-speech provider is configured in the server settings.",
+      });
+    }
+    const instructions = speechSummaryInstructions(input.languageHint);
+    const isGemini = settings.tts.provider.trim() === "gemini";
+    const baseUrl = (
+      settings.tts.baseUrl.trim() || (isGemini ? GEMINI_DEFAULT_BASE_URL : DEFAULT_BASE_URL)
+    ).replace(/\/+$/, "");
+    const request = yield* (
+      isGemini
+        ? HttpClientRequest.post(`${baseUrl}/models/${GEMINI_SUMMARY_MODEL}:generateContent`).pipe(
+            HttpClientRequest.setHeader("x-goog-api-key", apiKey),
+            HttpClientRequest.bodyJson({
+              systemInstruction: { parts: [{ text: instructions }] },
+              contents: [{ role: "user", parts: [{ text: reply }] }],
+            }),
+          )
+        : HttpClientRequest.post(`${baseUrl}/chat/completions`).pipe(
+            HttpClientRequest.bearerToken(apiKey),
+            HttpClientRequest.bodyJson({
+              model: OPENAI_SUMMARY_MODEL,
+              messages: [
+                { role: "system", content: instructions },
+                { role: "user", content: reply },
+              ],
+            }),
+          )
+    ).pipe(Effect.mapError(() => summarizeFailed("The summary request could not be encoded.")));
+    const response = yield* http.execute(request).pipe(
+      Effect.timeout("20 seconds"),
+      Effect.mapError(() => summarizeFailed("The summary provider could not be reached.")),
+    );
+    if (response.status !== 200) {
+      return yield* summarizeFailed(
+        `The summary provider rejected the request with status ${response.status}.`,
+      );
+    }
+    const json = (yield* response.json.pipe(
+      Effect.mapError(() =>
+        summarizeFailed("The summary provider returned an unreadable response."),
+      ),
+    )) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const text = (
+      isGemini
+        ? (json.candidates?.[0]?.content?.parts ?? []).map((part) => part.text ?? "").join("")
+        : (json.choices?.[0]?.message?.content ?? "")
+    ).trim();
+    if (text.length === 0) return yield* summarizeFailed("The summary provider returned no text.");
+    return { text };
   });
 
   const storeClip = Effect.fn("TextToSpeech.storeClip")(function* (input: {
@@ -378,26 +467,27 @@ const make = Effect.gen(function* () {
     return { relativeUrl: `/api/tts-audio/${token}`, expiresAt };
   });
 
-  const clip = (token: string): Effect.Effect<Option.Option<TtsClip>> =>
-    Effect.gen(function* () {
-      if (token.length === 0) return Option.none();
-      const files = yield* listClipFiles();
-      const file = files.find((file) =>
-        file.name.slice(0, file.name.lastIndexOf(".")).endsWith(`-${token}`),
-      );
-      if (file === undefined) return Option.none();
-      if (file.expiresAt <= (yield* Clock.currentTimeMillis)) {
-        yield* removeClipFile(file);
-        return Option.none();
-      }
-      const bytes = yield* fs
-        .readFile(path.join(clipsDir, file.name))
-        .pipe(Effect.orElseSucceed(() => new Uint8Array()));
-      if (bytes.length === 0) return Option.none();
-      return Option.some({ bytes, mimeType: clipMimeType(file.extension) });
-    });
+  const clip = Effect.fn("TextToSpeech.clip")(function* (
+    token: string,
+  ): Effect.fn.Return<Option.Option<TtsClip>> {
+    if (token.length === 0) return Option.none();
+    const files = yield* listClipFiles();
+    const file = files.find((file) =>
+      file.name.slice(0, file.name.lastIndexOf(".")).endsWith(`-${token}`),
+    );
+    if (file === undefined) return Option.none();
+    if (file.expiresAt <= (yield* Clock.currentTimeMillis)) {
+      yield* removeClipFile(file);
+      return Option.none();
+    }
+    const bytes = yield* fs
+      .readFile(path.join(clipsDir, file.name))
+      .pipe(Effect.orElseSucceed(() => new Uint8Array()));
+    if (bytes.length === 0) return Option.none();
+    return Option.some({ bytes, mimeType: clipMimeType(file.extension) });
+  });
 
-  return TextToSpeech.of({ synthesize, clip });
+  return TextToSpeech.of({ synthesize, summarize, clip });
 });
 
 export const layer = Layer.effect(TextToSpeech, make);

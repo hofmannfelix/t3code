@@ -41,6 +41,13 @@ const harness = vi.hoisted(() => {
   const downloads: Array<{ readonly url: string; readonly uri: string }> = [];
   const settingsAtom = { _tag: "settingsAtom" };
   let autoReadAloud = true;
+  const readAloud = {
+    summaryThreads: [] as Array<string>,
+    language: undefined as undefined | "de" | "en",
+    summary: { _tag: "Success", value: { text: "Kurz gesagt: fertig." } } as
+      | { readonly _tag: "Success"; readonly value: { readonly text: string } }
+      | { readonly _tag: "Failure" },
+  };
 
   const createAudioPlaylist = vi.fn((config: { sources: Array<{ uri: string }> }) => {
     const listeners = new Set<(status: ClipStatus) => void>();
@@ -90,6 +97,10 @@ const harness = vi.hoisted(() => {
       value: { relativeUrl: "/api/tts-audio/token-1", expiresAt: 0 },
     });
   });
+  const ttsSummarize = vi.fn(
+    (_input: { environmentId: string; input: { text: string; languageHint?: string } }) =>
+      Promise.resolve(readAloud.summary),
+  );
   const setAudioModeAsync = vi.fn(async () => undefined);
   const setIsAudioActiveAsync = vi.fn(async () => undefined);
   const downloadFileAsync = vi.fn(async (url: string) => {
@@ -108,6 +119,8 @@ const harness = vi.hoisted(() => {
     createAudioPlayer: createAudioPlaylist,
     createAudioPlaylist,
     ttsSynthesize,
+    ttsSummarize,
+    readAloud,
     setAudioModeAsync,
     setIsAudioActiveAsync,
     downloadFileAsync,
@@ -166,6 +179,7 @@ vi.mock("../../state/session", () => ({
 vi.mock("../../state/server", () => ({
   serverEnvironment: {
     ttsSynthesize: harness.ttsSynthesize,
+    ttsSummarize: harness.ttsSummarize,
     settingsValueAtom: () => harness.settingsAtom,
   },
 }));
@@ -177,8 +191,16 @@ vi.mock("@effect/atom-react", () => ({
     if (atom === harness.settingsAtom) {
       return { tts: { autoReadAloud: harness.autoReadAloud } };
     }
-    return { _tag: "Success", value: { readAloudAutoSpeak: harness.autoReadAloud } };
+    return {
+      _tag: "Success",
+      value: {
+        readAloudAutoSpeak: harness.autoReadAloud,
+        readAloudSummaryThreads: harness.readAloud.summaryThreads,
+        readAloudLanguage: harness.readAloud.language,
+      },
+    };
   },
+  useAtomSet: () => () => {},
 }));
 vi.mock("expo-file-system", () => ({
   File: Object.assign(
@@ -203,6 +225,7 @@ vi.mock("expo-file-system", () => ({
 }));
 vi.mock("../../state/preferences", () => ({
   mobilePreferencesAtom: {},
+  updateMobilePreferencesAtom: {},
 }));
 vi.mock("./deviceTts", () => ({
   getDeviceTtsConfig: () => harness.device.config,
@@ -298,6 +321,10 @@ describe("useReadAloud", () => {
     harness.downloadFileAsync.mockClear();
     harness.createAudioPlaylist.mockClear();
     harness.ttsSynthesize.mockClear();
+    harness.ttsSummarize.mockClear();
+    harness.readAloud.summaryThreads = [];
+    harness.readAloud.language = undefined;
+    harness.readAloud.summary = { _tag: "Success", value: { text: "Kurz gesagt: fertig." } };
     harness.setAudioModeAsync.mockClear();
     harness.setIsAudioActiveAsync.mockClear();
     stopAllSpeech();
@@ -488,6 +515,80 @@ describe("useReadAloud", () => {
     });
     await flush();
     expect(spokenTexts().map(normalize).join(" ")).toContain("Erster Teil. Zweiter Teil.");
+
+    act(() => {
+      view.stop()();
+    });
+  });
+
+  it("reads an automatic reply of a summary thread as its short update", async () => {
+    harness.readAloud.summaryThreads = ["env-1/thread-short"];
+    harness.readAloud.language = "de";
+    const view = renderReadAloud();
+    await act(async () => {
+      view.enqueue()({
+        key: "msg-short",
+        text: "Ich habe die Tests repariert. Danach lief alles durch.",
+        threadId: "thread-short",
+        environmentId: "env-1" as EnvironmentId,
+      });
+    });
+    await flush();
+
+    expect(harness.ttsSummarize).toHaveBeenCalledWith({
+      environmentId: "env-1",
+      input: {
+        text: "Ich habe die Tests repariert. Danach lief alles durch.",
+        languageHint: "de",
+      },
+    });
+    expect(spokenTexts().map(normalize).join(" ")).toBe("T3 Code: Kurz gesagt: fertig.");
+    expect(harness.ttsSynthesize.mock.calls[0]![0]).toMatchObject({
+      input: { languageHint: "de" },
+    });
+
+    act(() => {
+      view.stop()();
+    });
+  });
+
+  it("reads the full reply when the short update fails", async () => {
+    harness.readAloud.summaryThreads = ["env-1/thread-short"];
+    harness.readAloud.summary = { _tag: "Failure" };
+    const view = renderReadAloud();
+    await act(async () => {
+      view.enqueue()({
+        key: "msg-full",
+        text: "Alles erledigt.",
+        threadId: "thread-short",
+        environmentId: "env-1" as EnvironmentId,
+      });
+    });
+    await flush();
+
+    expect(harness.ttsSummarize).toHaveBeenCalledTimes(1);
+    expect(spokenTexts().map(normalize)).toEqual(["T3 Code: Alles erledigt."]);
+
+    act(() => {
+      view.stop()();
+    });
+  });
+
+  it("reads a manual request in full even on a summary thread", async () => {
+    harness.readAloud.summaryThreads = ["env-1/thread-short"];
+    const view = renderReadAloud();
+    await act(async () => {
+      view.speak()({
+        key: "msg-manual",
+        text: "Alles erledigt.",
+        threadId: "thread-short",
+        environmentId: "env-1" as EnvironmentId,
+      });
+    });
+    await flush();
+
+    expect(harness.ttsSummarize).not.toHaveBeenCalled();
+    expect(spokenTexts().map(normalize)).toEqual(["T3 Code: Alles erledigt."]);
 
     act(() => {
       view.stop()();

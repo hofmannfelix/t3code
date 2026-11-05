@@ -10,8 +10,10 @@ import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScroll
 import { type VoiceTranscriptionProvider } from "../../persistence/mobile-preferences";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { GEMINI_TTS_DEFAULT_MODEL, GEMINI_TTS_DEFAULT_VOICE } from "../threads/deviceTts";
+import type { SpeechLanguageHint } from "@t3tools/shared/textForSpeech";
 import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
 import { SettingsSection } from "./components/SettingsSection";
+import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 
 interface ProviderOption {
@@ -261,8 +263,67 @@ export function SettingsVoiceInputRouteScreen() {
           onVoiceChange={handleSaveReadAloudVoice}
           onWaitingAudioChange={handleSelectWaitingAudio}
         />
+        <ReadAloudBehaviorSection />
       </ScrollView>
     </SettingsScreen>
+  );
+}
+
+const LANGUAGE_OPTIONS: ReadonlyArray<{
+  readonly id: SpeechLanguageHint | null;
+  readonly label: string;
+  readonly description: string;
+}> = [
+  {
+    id: null,
+    label: "Automatic",
+    description: "The voice follows the language of each reply.",
+  },
+  {
+    id: "de",
+    label: "Deutsch",
+    description: "Leans toward German; clearly English passages stay English.",
+  },
+  {
+    id: "en",
+    label: "English",
+    description: "Leans toward English; clearly German passages stay German.",
+  },
+];
+
+/** Automatic reading and the spoken language, shared by every read-aloud provider. */
+function ReadAloudBehaviorSection() {
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const savePreferences = useAtomSet(updateMobilePreferencesAtom);
+  const preferences = AsyncResult.isSuccess(preferencesResult)
+    ? preferencesResult.value
+    : undefined;
+  const language = preferences?.readAloudLanguage ?? null;
+  return (
+    <>
+      <SettingsSection title="Read aloud behavior">
+        <SettingsSwitchRow
+          icon="speaker.wave.2"
+          label="Read new replies aloud"
+          subtitle="Speaks newly completed assistant replies on this device."
+          value={preferences?.readAloudAutoSpeak === true}
+          onValueChange={(value) => savePreferences({ readAloudAutoSpeak: value })}
+        />
+      </SettingsSection>
+      <SettingsSection title="Spoken language">
+        {LANGUAGE_OPTIONS.map((option, index) => (
+          <SettingsChoiceRow
+            key={option.id ?? "auto"}
+            label={option.label}
+            description={option.description}
+            selected={language === option.id}
+            separated={index > 0}
+            disabled={preferences === undefined}
+            onPress={() => savePreferences({ readAloudLanguage: option.id ?? undefined })}
+          />
+        ))}
+      </SettingsSection>
+    </>
   );
 }
 

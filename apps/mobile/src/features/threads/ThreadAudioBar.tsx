@@ -32,6 +32,7 @@ import {
   useThreadAudioMode,
   useIsAudioSessionActive,
   useReadAloudProgress,
+  useReadAloudSummaryToggle,
   getActiveAudioSessionTarget,
   disarmReadAloudOnNextReply,
   startGlobalAudioSession,
@@ -153,6 +154,11 @@ export function ThreadAudioBar(props?: {
   );
   const isSessionActive = useIsAudioSessionActive();
   const phase = speech.phase;
+  const activeTarget = getActiveAudioSessionTarget();
+  const targetEnvId = speech.environmentId ?? activeTarget?.environmentId;
+  const targetThreadId = speech.threadId ?? activeTarget?.threadId;
+  const selectDetail = useSelectWorkspaceDetail();
+  const summaryToggle = useReadAloudSummaryToggle(targetEnvId, targetThreadId);
 
   // Render nothing when no session is active and no speech is playing
   if (phase === null && !isSessionActive) {
@@ -178,13 +184,9 @@ export function ThreadAudioBar(props?: {
     stopGlobalAudioSession();
   };
 
-  const activeTarget = getActiveAudioSessionTarget();
-  const targetEnvId = speech.environmentId ?? activeTarget?.environmentId;
-  const targetThreadId = speech.threadId ?? activeTarget?.threadId;
   // Always show project title, NEVER the thread title:
   const targetProjectTitle = speech.projectTitle ?? activeTarget?.projectTitle ?? "T3 Code";
 
-  const selectDetail = useSelectWorkspaceDetail();
   const handleNavigateToThread = () => {
     if (targetEnvId && targetThreadId) {
       selectDetail({
@@ -233,6 +235,34 @@ export function ThreadAudioBar(props?: {
 
         {/* Right audio controls: ALWAYS visible on the bar */}
         <View className="flex-row items-center gap-2.5">
+          {summaryToggle.available ? (
+            <Pressable
+              accessibilityRole="switch"
+              accessibilityState={{ checked: summaryToggle.enabled }}
+              accessibilityLabel="Kurze Updates für diesen Thread"
+              accessibilityHint="Liest neue Antworten dieses Threads als kurze Zusammenfassung vor"
+              hitSlop={6}
+              onPress={() => {
+                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                summaryToggle.toggle();
+              }}
+              className={
+                summaryToggle.enabled
+                  ? "h-7 items-center justify-center rounded-full bg-primary px-2.5 active:opacity-75"
+                  : "h-7 items-center justify-center rounded-full bg-foreground/10 px-2.5 active:opacity-75"
+              }
+            >
+              <Text
+                className={
+                  summaryToggle.enabled
+                    ? "text-xs font-t3-bold text-primary-foreground"
+                    : "text-xs font-t3-bold text-foreground-muted"
+                }
+              >
+                Kurz
+              </Text>
+            </Pressable>
+          ) : null}
           {/* -10 seconds */}
           <Pressable
             accessibilityRole="button"

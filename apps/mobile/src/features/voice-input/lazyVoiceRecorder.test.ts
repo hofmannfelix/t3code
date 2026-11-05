@@ -157,4 +157,23 @@ describe("createLazyVoiceRecorder", () => {
       expect(controller.currentState.phase).toBe("recording");
     });
   });
+
+  it("reports the input the route uses after selection, not the one requested", async () => {
+    const resolved: Array<VoiceRecordingInput | null> = [];
+    const recorder = createLazyVoiceRecorder({
+      create: () =>
+        Object.assign(createNativeRecorder("file:///voice.m4a"), {
+          // iOS kept the headset even though the built-in microphone was preferred.
+          getCurrentInput: async () => ({ uid: "airpods", name: "AirPods", type: "BluetoothHFP" }),
+        }),
+      onStatus: () => {},
+      selectInput: (inputs) => inputs[1] ?? null,
+      onInputResolved: (input) => resolved.push(input),
+    });
+
+    await recorder.prepareToRecordAsync();
+    await Promise.resolve();
+
+    expect(resolved).toEqual([{ uid: "airpods", name: "AirPods", type: "BluetoothHFP" }]);
+  });
 });

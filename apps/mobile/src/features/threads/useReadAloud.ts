@@ -3,7 +3,7 @@ import {
   isAudioSessionOrPlaybackActive,
 } from "../../lib/audioActiveTracker";
 import { DEFAULT_SERVER_SETTINGS, type EnvironmentId } from "@t3tools/contracts";
-import { useAtomValue } from "@effect/atom-react";
+import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import {
   createAudioPlaylist,
   setAudioModeAsync,
@@ -22,12 +22,12 @@ import type { AgentActivityProps, AgentActivityRowProps } from "../../widgets/Ag
 import { usePreparedConnection } from "../../state/session";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { mobilePreferencesAtom } from "../../state/preferences";
+import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { savePreferencesPatch } from "../../persistence/imperative";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { Directory, File, Paths } from "expo-file-system";
 import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
-import { getDeviceTtsConfig, streamWavSegments } from "./deviceTts";
+import { getDeviceTtsConfig, streamWavSegments, summarizeOnDevice } from "./deviceTts";
 import {
   audioDurationSeconds,
   estimateSpeechSeconds,
@@ -37,7 +37,7 @@ import {
   timelinePosition,
   type ReadAloudTimeline,
 } from "./readAloudTimeline";
-import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
+import { cleanTextForSpeech, type SpeechLanguageHint } from "@t3tools/shared/textForSpeech";
 import type { TurnPart } from "../../lib/threadActivity";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentThreadShells } from "../../state/threads";
@@ -64,6 +64,8 @@ interface ReadItem {
   readonly projectTitle?: string;
   /** Pre-rendered device clip; present skips synthesis and plays the file. */
   readonly clipUri?: string;
+  /** Set for threads read as short updates; `text` stays the full reply as the fallback. */
+  readonly summary?: { readonly prefix: string; readonly body: string };
 }
 
 /** Whole-reply playback position, rounded to seconds so subscribers re-render at most once per second. */
@@ -113,8 +115,6 @@ const T3NativeControls =
         setWaitingAudioMode?: (mode: string) => Promise<void>;
         isSpeaking?: () => boolean;
         deactivateAudioSession?: () => Promise<boolean>;
-        enforceBuiltInMicrophone?: () => Promise<boolean>;
-        resetPreferredAudioInput?: () => Promise<boolean>;
       } | null)
     : null;
 
@@ -1179,6 +1179,14 @@ export const resumeAudioAfterVoiceRecording = async () => {
 };
 
 let chunkedPlayback = true;
+/** Mirrors the read-aloud preferences for the module-level queue. */
+let speechLanguageHint: SpeechLanguageHint | undefined;
+let summaryThreadKeys: ReadonlySet<string> = new Set();
+/** How long a short update may take before the full reply is read instead. */
+const SUMMARY_TIMEOUT_MS = 15_000;
+
+export const readAloudSummaryKey = (environmentId: string, threadId: string) =>
+  `${environmentId}/${threadId}`;
 
 let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
 let activeStartAnswerBlock: ((item: ReadItem, isCurrent: () => boolean) => void) | null = null;
@@ -1334,6 +1342,13 @@ const enqueueAnswerBlock = (
     announcedReplyKeys.delete(announcedReplyKeys.values().next().value!);
   }
 
+  // A manual "read this" plays in full; automatic replies of summary threads get condensed.
+  const summarize =
+    item.source !== "manual" &&
+    !item.clipUri &&
+    resolvedEnvId !== null &&
+    item.threadId !== undefined &&
+    summaryThreadKeys.has(readAloudSummaryKey(resolvedEnvId, item.threadId));
   const blockItem: ReadItem = {
     key: item.key,
     text: textToSpeak,
@@ -1343,6 +1358,7 @@ const enqueueAnswerBlock = (
     environmentId: resolvedEnvId ?? undefined,
     title: item.title,
     projectTitle,
+    ...(summarize ? { summary: { prefix: `${projectTitle}:`, body: cleanedText } } : {}),
   };
 
   if (options?.forceImmediate) {
@@ -1448,6 +1464,13 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
   const readAloudGeminiApiKey = readAloudPreferences?.readAloudGeminiApiKey;
   const readAloudGeminiModel = readAloudPreferences?.readAloudGeminiModel;
   const readAloudGeminiVoice = readAloudPreferences?.readAloudGeminiVoice;
+  const readAloudLanguage = readAloudPreferences?.readAloudLanguage;
+  const readAloudSummaryThreads = readAloudPreferences?.readAloudSummaryThreads;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the module-level queue reads the language and summary threads outside React
+  useEffect(() => {
+    speechLanguageHint = readAloudLanguage;
+    summaryThreadKeys = new Set(readAloudSummaryThreads ?? []);
+  }, [readAloudLanguage, readAloudSummaryThreads]);
 
   const deviceTtsConfig = useMemo(
     () =>
@@ -1456,11 +1479,22 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         readAloudGeminiApiKey,
         readAloudGeminiModel,
         readAloudGeminiVoice,
+        readAloudLanguage,
       }),
-    [readAloudProvider, readAloudGeminiApiKey, readAloudGeminiModel, readAloudGeminiVoice],
+    [
+      readAloudProvider,
+      readAloudGeminiApiKey,
+      readAloudGeminiModel,
+      readAloudGeminiVoice,
+      readAloudLanguage,
+    ],
   );
   const ttsSynthesize = useAtomCommand(serverEnvironment.ttsSynthesize, {
     label: "speak message",
+    reportFailure: false,
+  });
+  const ttsSummarize = useAtomCommand(serverEnvironment.ttsSummarize, {
+    label: "summarize message",
     reportFailure: false,
   });
   const ttsSettings = useAtomValue(
@@ -1522,7 +1556,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
             `${itemToSpeak.text.length} chars`,
           );
           await T3NativeControls.speakText(itemToSpeak.text, {
-            language: "de-DE",
+            language: speechLanguageHint === "en" ? "en-US" : "de-DE",
             title: itemToSpeak.title ?? "Antwort",
             projectTitle: itemToSpeak.projectTitle ?? "T3 Code",
           });
@@ -1777,7 +1811,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         const result = await Promise.race([
           ttsSynthesize({
             environmentId: (item.environmentId ?? environmentId) as EnvironmentId,
-            input: { text },
+            input: { text, ...(speechLanguageHint ? { languageHint: speechLanguageHint } : {}) },
           }),
           new Promise<never>((_, reject) => {
             setTimeout(
@@ -2115,25 +2149,67 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
     stopCurrent();
   }, []);
 
+  /** The short update for `item`, or null to read the full reply. */
+  const summarizeReply = useCallback(
+    async (item: ReadItem, body: string, signal: AbortSignal): Promise<string | null> => {
+      const timeout = new Promise<null>((resolve) =>
+        setTimeout(() => resolve(null), SUMMARY_TIMEOUT_MS),
+      );
+      const request = async (): Promise<string | null> => {
+        if (deviceTtsConfig) return summarizeOnDevice(deviceTtsConfig, body, signal);
+        const result = await ttsSummarize({
+          environmentId: (item.environmentId ?? environmentId) as EnvironmentId,
+          input: {
+            text: body,
+            ...(speechLanguageHint ? { languageHint: speechLanguageHint } : {}),
+          },
+        });
+        return result._tag === "Success" ? result.value.text : null;
+      };
+      try {
+        return await Promise.race([request(), timeout]);
+      } catch (error) {
+        log("summarizeReply failed, reading the full reply", error);
+        return null;
+      }
+    },
+    [deviceTtsConfig, environmentId, ttsSummarize],
+  );
+
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- registers this mount's synthesizers with the module-level answer queue
   useEffect(() => {
-    activeStartAnswerBlock = (item: ReadItem, isCurrent: () => boolean) => {
+    const play = (item: ReadItem, isCurrent: () => boolean) => {
       if (deviceTtsConfig && !item.clipUri) {
         consumeDeviceStream(item, isCurrent);
       } else {
         playServerBlock(item, isCurrent);
       }
     };
+    const start = (item: ReadItem, isCurrent: () => boolean) => {
+      const summary = item.summary;
+      if (!summary) {
+        play(item, isCurrent);
+        return;
+      }
+      const abort = new AbortController();
+      activeStreamAbort = abort;
+      void summarizeReply(item, summary.body, abort.signal).then((short) => {
+        if (!isCurrent() || abort.signal.aborted) return;
+        const next: ReadItem =
+          short === null
+            ? { ...item, summary: undefined }
+            : { ...item, text: `${summary.prefix} ${short}`, summary: undefined };
+        // Replaying this answer later reads the same update instead of summarizing again.
+        if (currentAnswerBlock?.key === item.key) currentAnswerBlock = next;
+        play(next, isCurrent);
+      });
+    };
+    activeStartAnswerBlock = start;
     playThroughCurrentDeps = (item: ReadItem) => {
       const run = ++runCounter;
-      const isCurrent = () => run === runCounter;
-      if (deviceTtsConfig && !item.clipUri) {
-        consumeDeviceStream(item, isCurrent);
-      } else {
-        playServerBlock(item, isCurrent);
-      }
+      start(item, () => run === runCounter);
     };
-  }, [consumeDeviceStream, deviceTtsConfig, playServerBlock]);
+  }, [consumeDeviceStream, deviceTtsConfig, playServerBlock, summarizeReply]);
 
   return {
     speech,
@@ -2261,4 +2337,32 @@ export function useReadAloudAutoAnnounce(input: {
       }
     }
   }, [autoRead, environmentId, feed, enqueue, threadId, threadTitle, projectTitle, turnParts]);
+}
+
+/** Whether automatic replies of a thread are read as a short update, and the switch for it. */
+export function useReadAloudSummaryToggle(
+  environmentId: string | null | undefined,
+  threadId: string | null | undefined,
+) {
+  const preferencesResult = useAtomValue(mobilePreferencesAtom);
+  const updatePreferences = useAtomSet(updateMobilePreferencesAtom);
+  const key = environmentId && threadId ? readAloudSummaryKey(environmentId, threadId) : null;
+  const enabled =
+    key !== null &&
+    AsyncResult.isSuccess(preferencesResult) &&
+    (preferencesResult.value.readAloudSummaryThreads ?? []).includes(key);
+  const toggle = () => {
+    if (key === null) return;
+    updatePreferences({
+      transform: (current) => {
+        const keys = current.readAloudSummaryThreads ?? [];
+        return {
+          readAloudSummaryThreads: keys.includes(key)
+            ? keys.filter((existing) => existing !== key)
+            : [...keys, key],
+        };
+      },
+    });
+  };
+  return { available: key !== null, enabled, toggle };
 }

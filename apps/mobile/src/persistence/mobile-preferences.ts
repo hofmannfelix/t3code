@@ -19,6 +19,7 @@ import type { ComposerEnterBehavior } from "../lib/composerEnterBehavior";
 import type { FollowUpBehavior } from "../lib/followUpBehavior";
 import { isMicrophoneKind, type MicrophoneEntry } from "../lib/microphonePriority";
 import { MOBILE_THEME_IDS, type MobileThemeId, type MobileThemeMode } from "../lib/mobileTheme";
+import { SPEECH_LANGUAGE_HINTS, type SpeechLanguageHint } from "@t3tools/shared/textForSpeech";
 import * as MobileDatabase from "./mobile-database";
 import * as MobileSecureStorage from "./mobile-secure-storage";
 import { MobileStorageDecodeError, MobileStorageEncodeError } from "./mobile-storage";
@@ -143,6 +144,10 @@ export interface Preferences {
   readonly readAloudAutoSpeak?: boolean;
   /** Waiting audio while audio session is active: "music" (default elevator music) or "silent" (empty track keeping session alive). */
   readonly readAloudWaitingAudio?: "music" | "silent";
+  /** Preferred spoken language as a hint; absent lets the voice follow the text. */
+  readonly readAloudLanguage?: SpeechLanguageHint;
+  /** `environmentId/threadId` keys whose automatic replies are read as a short summary. */
+  readonly readAloudSummaryThreads?: ReadonlyArray<string>;
   /** Whether an audio session was active when the app was last running. */
   readonly audioSessionActive?: boolean;
   /** Active thread/project target for restoring the audio session upon app launch. */
@@ -241,6 +246,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     readAloudGeminiVoice?: string;
     readAloudAutoSpeak?: boolean;
     readAloudWaitingAudio?: "music" | "silent";
+    readAloudLanguage?: SpeechLanguageHint;
+    readAloudSummaryThreads?: ReadonlyArray<string>;
     audioSessionActive?: boolean;
     audioSessionTarget?: {
       readonly environmentId?: string | null;
@@ -433,6 +440,14 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (parsed.readAloudWaitingAudio === "music" || parsed.readAloudWaitingAudio === "silent") {
     preferences.readAloudWaitingAudio = parsed.readAloudWaitingAudio;
+  }
+  if ((SPEECH_LANGUAGE_HINTS as ReadonlyArray<unknown>).includes(parsed.readAloudLanguage)) {
+    preferences.readAloudLanguage = parsed.readAloudLanguage as SpeechLanguageHint;
+  }
+  if (Array.isArray(parsed.readAloudSummaryThreads)) {
+    preferences.readAloudSummaryThreads = parsed.readAloudSummaryThreads.filter(
+      (key): key is string => typeof key === "string",
+    );
   }
   if (typeof parsed.audioSessionActive === "boolean") {
     preferences.audioSessionActive = parsed.audioSessionActive;

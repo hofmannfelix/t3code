@@ -71,6 +71,7 @@ export function useVoiceInputController(input: {
     state,
     audioLevels: global.audioLevels,
     elapsedSeconds: global.elapsedSeconds,
+    microphone: global.ownerKey === input.ownerKey ? global.microphone : null,
     isBusy,
     freezesEditor: isBusy,
     blocksSubmission: isBusy,

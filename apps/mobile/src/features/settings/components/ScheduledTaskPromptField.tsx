@@ -69,6 +69,7 @@ export function ScheduledTaskPromptField(props: {
               elapsedSeconds={voice.elapsedSeconds}
               phase={voice.state.phase}
               presentation={presentation}
+              microphoneName={voice.microphone?.name}
             />
             <ComposerDictationPrimaryAction
               state={voice.state}

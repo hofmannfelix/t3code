@@ -55,3 +55,48 @@ export function cleanTextForSpeech(raw: string): string {
 
   return text.trim();
 }
+
+/** A preferred spoken language. Absent means the voice follows the text. */
+export type SpeechLanguageHint = "de" | "en";
+
+export const SPEECH_LANGUAGE_HINTS: ReadonlyArray<SpeechLanguageHint> = ["de", "en"];
+
+/**
+ * Style direction for voice models that take one in the prompt (Gemini). It is a hint, not a
+ * lock: passages clearly in another language keep their own pronunciation. The direction is
+ * written in the hinted language, since an English lead tilts the voice toward English.
+ */
+export function speechLanguageDirection(hint: SpeechLanguageHint | undefined): string {
+  if (hint === "de") {
+    return "Lies den folgenden Text auf Deutsch vor. Passagen, die eindeutig in einer anderen Sprache sind, sprichst du in dieser Sprache:";
+  }
+  if (hint === "en") {
+    return "Read the following text aloud in English. Speak passages that are clearly in another language in that language:";
+  }
+  return "";
+}
+
+/** Prepends the language direction, or returns `text` unchanged without a hint. */
+export function withSpeechLanguageDirection(
+  text: string,
+  hint: SpeechLanguageHint | undefined,
+): string {
+  const direction = speechLanguageDirection(hint);
+  return direction ? `${direction}\n\n${text}` : text;
+}
+
+/** Instructions for turning an agent reply into a short spoken status update. */
+export function speechSummaryInstructions(hint: SpeechLanguageHint | undefined): string {
+  const language =
+    hint === "de"
+      ? "Answer in German."
+      : hint === "en"
+        ? "Answer in English."
+        : "Answer in the language the reply is written in.";
+  return [
+    "You turn a coding agent's reply into a short spoken status update for a developer who is listening, not reading.",
+    "Use at most two short sentences. Say what was done or found and whether anything needs the developer's attention.",
+    "Leave out code, file paths, commands, URLs, lists and formatting. Do not add a greeting or a preamble.",
+    language,
+  ].join(" ");
+}

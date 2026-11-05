@@ -5,11 +5,19 @@ import { Paths } from "expo-file-system";
 import { fetch } from "expo/fetch";
 
 import type { Preferences } from "../../persistence/mobile-preferences";
-import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
+import {
+  cleanTextForSpeech,
+  speechSummaryInstructions,
+  withSpeechLanguageDirection,
+  type SpeechLanguageHint,
+} from "@t3tools/shared/textForSpeech";
 
 export const GEMINI_TTS_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 export const GEMINI_TTS_DEFAULT_MODEL = "gemini-3.8-flash-lite-tts";
 export const GEMINI_TTS_DEFAULT_VOICE = "Kore";
+/** Text model for short spoken updates, sharing the read-aloud key. */
+const GEMINI_SUMMARY_MODEL = "gemini-flash-lite-latest";
+const MAX_SUMMARY_INPUT_CHARS = 12_000;
 
 /** Stage logging for the device pipeline; visible in Metro during development. */
 const log = (...args: unknown[]) => {
@@ -20,6 +28,7 @@ export interface DeviceTtsConfig {
   readonly apiKey: string;
   readonly model: string;
   readonly voice: string;
+  readonly languageHint?: SpeechLanguageHint;
 }
 
 export class DeviceTtsError extends Schema.TaggedError<DeviceTtsError>()("DeviceTtsError", {
@@ -41,6 +50,7 @@ export function getDeviceTtsConfig(preferences?: Preferences): DeviceTtsConfig |
     apiKey,
     model: prefs.readAloudGeminiModel?.trim() || GEMINI_TTS_DEFAULT_MODEL,
     voice: prefs.readAloudGeminiVoice?.trim() || GEMINI_TTS_DEFAULT_VOICE,
+    ...(prefs.readAloudLanguage ? { languageHint: prefs.readAloudLanguage } : {}),
   };
 }
 
@@ -194,7 +204,7 @@ async function synthesizeBytes(
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      contents: [{ parts: [{ text }] }],
+      contents: [{ parts: [{ text: withSpeechLanguageDirection(text, config.languageHint) }] }],
       generationConfig: {
         responseModalities: ["AUDIO"],
         speechConfig,
@@ -273,7 +283,7 @@ export async function* streamWavSegments(
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          contents: [{ parts: [{ text }] }],
+          contents: [{ parts: [{ text: withSpeechLanguageDirection(text, config.languageHint) }] }],
           generationConfig: {
             responseModalities: ["AUDIO"],
             speechConfig,
@@ -443,4 +453,43 @@ export async function synthesizeClipFile(
     });
   }
   return file.uri;
+}
+
+/**
+ * Condenses a reply into a short spoken update with a Gemini text model and the read-aloud key.
+ * Rejects on any failure so the caller can read the full reply instead.
+ */
+export async function summarizeOnDevice(
+  config: DeviceTtsConfig,
+  text: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const response = await fetch(
+    `${GEMINI_TTS_BASE_URL}/models/${GEMINI_SUMMARY_MODEL}:generateContent`,
+    {
+      method: "POST",
+      headers: { "x-goog-api-key": config.apiKey, "content-type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: speechSummaryInstructions(config.languageHint) }] },
+        contents: [{ role: "user", parts: [{ text: text.slice(0, MAX_SUMMARY_INPUT_CHARS) }] }],
+      }),
+      signal,
+    },
+  );
+  if (!response.ok) {
+    throw new DeviceTtsError({
+      message: `Gemini rejected the summary request with status ${response.status}.`,
+    });
+  }
+  const json = (await response.json()) as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+  };
+  const summary = (json.candidates?.[0]?.content?.parts ?? [])
+    .map((part) => part.text ?? "")
+    .join("")
+    .trim();
+  if (summary.length === 0) {
+    throw new DeviceTtsError({ message: "Gemini returned no summary for this reply." });
+  }
+  return summary;
 }

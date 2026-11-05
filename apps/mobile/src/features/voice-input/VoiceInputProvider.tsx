@@ -24,7 +24,7 @@ import {
   voiceInputBlocksSubmission,
   type VoiceTranscriber,
 } from "@t3tools/client-runtime/voice-input";
-import { createLazyVoiceRecorder } from "./lazyVoiceRecorder";
+import { createLazyVoiceRecorder, type VoiceRecordingInput } from "./lazyVoiceRecorder";
 import { VOICE_WAVEFORM_SAMPLE_COUNT } from "./voiceInputMetering";
 import { VoiceInputSession } from "./voiceInputSession";
 import { createVoiceRecordingPermission } from "./voiceRecordingPermission";
@@ -75,6 +75,12 @@ const localVoiceInputAvailableAtom = Atom.make((get) => {
   const transcriber = get(localVoiceTranscriberAtom);
   return transcriber !== null && transcriber !== "checking";
 });
+
+/** The input the current recording uses, so the composer can say which microphone listens. */
+const activeMicrophoneAtom = Atom.make<VoiceRecordingInput | null>(null).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("mobile:voice-input:microphone"),
+);
 
 const cloudVoiceInputAvailableAtom = Atom.make((get) => {
   const preferences = get(mobilePreferencesAtom);
@@ -128,6 +134,7 @@ const voiceInputAtom = Atom.make((get) => {
       }
       return preferredMicrophoneInput(inputs, order);
     },
+    onInputResolved: (input) => registry.set(activeMicrophoneAtom, input),
   });
   const session: VoiceInputSession = new VoiceInputSession({
     recorder,
@@ -161,6 +168,7 @@ const voiceInputAtom = Atom.make((get) => {
         if (audioToken) await releaseAudioSession(audioToken);
       } finally {
         audioToken = null;
+        registry.set(activeMicrophoneAtom, null);
         await resumeAudioAfterVoiceRecording();
       }
     },
@@ -186,16 +194,17 @@ export function useGlobalVoiceInput() {
   const { session, audioLevels } = useAtomValue(voiceInputAtom);
   const isTranscriberAvailable = useAtomValue(localVoiceInputAvailableAtom);
   const hasCloudTranscriber = useAtomValue(cloudVoiceInputAvailableAtom);
+  const microphone = useAtomValue(activeMicrophoneAtom);
   const snapshot = useSyncExternalStore(session.subscribe, session.getSnapshot);
   return {
     ...snapshot,
-    isAvailable:
-      isTranscriberAvailable || hasCloudTranscriber || getNativeShowcaseScene() !== null,
+    isAvailable: isTranscriberAvailable || hasCloudTranscriber || getNativeShowcaseScene() !== null,
     audioLevels,
     isBusy: voiceInputBlocksSubmission(snapshot.state),
     session,
     stop: () => session.controller.stop(),
     cancel: () => session.controller.cancel(),
+    microphone,
     hasRetryableRecording: session.hasRetryableRecording,
     retry: () => session.retry(),
   };

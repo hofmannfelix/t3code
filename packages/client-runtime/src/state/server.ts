@@ -1454,7 +1454,15 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.serverTtsSynthesize,
       concurrency: {
         mode: "singleFlight",
-        key: ({ input }) => input.text,
+        key: ({ input }) => `${input.languageHint ?? ""}:${input.text}`,
+      },
+    }),
+    ttsSummarize: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:tts-summarize",
+      tag: WS_METHODS.serverTtsSummarize,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ input }) => `${input.languageHint ?? ""}:${input.text}`,
       },
     }),
     mutateProviderInstance: updateSettings,
