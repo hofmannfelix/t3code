@@ -369,7 +369,10 @@ describe("VoiceInputController", () => {
       getTranscriber: () => ({
         prepare: async () =>
           preparedTranscription(async () => {
-            throw new VoiceTranscriptionError({ code: "transcription-failed", message: "Transcription request failed (401): Invalid API Key" });
+            throw new VoiceTranscriptionError({
+              code: "transcription-failed",
+              message: "Transcription request failed (401): Invalid API Key",
+            });
           }),
       }),
     });
@@ -612,7 +615,10 @@ describe("VoiceInputController", () => {
           preparedTranscription(async () => {
             if (failFirst) {
               failFirst = false;
-              throw new VoiceTranscriptionError({ code: "transcription-failed", message: "Transcription request timed out" });
+              throw new VoiceTranscriptionError({
+                code: "transcription-failed",
+                message: "Transcription request timed out",
+              });
             }
             return "retried text";
           }),
@@ -641,7 +647,10 @@ describe("VoiceInputController", () => {
       getTranscriber: () => ({
         prepare: async () =>
           preparedTranscription(async () => {
-            throw new VoiceTranscriptionError({ code: "transcription-failed", message: "Network error" });
+            throw new VoiceTranscriptionError({
+              code: "transcription-failed",
+              message: "Network error",
+            });
           }),
       }),
     });
