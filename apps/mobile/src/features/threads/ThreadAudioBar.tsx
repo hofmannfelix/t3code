@@ -15,7 +15,12 @@ import { FullWindowOverlay } from "react-native-screens";
 import * as Option from "effect/Option";
 
 import { SymbolView } from "../../components/ui/AppSymbol";
-import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
+import { rootNavigationRef } from "../../lib/rootNavigation";
+import { startOpeningDetail } from "../workspace/useSelectWorkspaceDetail";
+import {
+  selectWorkspaceDetail,
+  type WorkspaceDetail,
+} from "../workspace/workspace-detail-selection";
 import { gatherMessageTurnParts } from "../../lib/threadActivity";
 import { useEnvironmentThread } from "../../state/threads";
 import { cleanTextForSpeech } from "@t3tools/shared/textForSpeech";
@@ -177,7 +182,6 @@ export function ThreadAudioBar(props?: {
   const activeTarget = getActiveAudioSessionTarget();
   const targetEnvId = speech.environmentId ?? activeTarget?.environmentId;
   const targetThreadId = speech.threadId ?? activeTarget?.threadId;
-  const selectDetail = useSelectWorkspaceDetail();
   const summaryToggle = useReadAloudSummaryToggle(targetEnvId, targetThreadId);
 
   // Render nothing when no session is active and no speech is playing
@@ -208,12 +212,14 @@ export function ThreadAudioBar(props?: {
   const targetProjectTitle = speech.projectTitle ?? activeTarget?.projectTitle ?? "T3 Code";
 
   const handleNavigateToThread = () => {
-    if (targetEnvId && targetThreadId) {
-      selectDetail({
-        name: "Thread",
-        params: { environmentId: String(targetEnvId), threadId: String(targetThreadId) },
-      });
-    }
+    // The bar renders above the navigator, so navigation hooks are unavailable here.
+    if (!targetEnvId || !targetThreadId || !rootNavigationRef.isReady()) return;
+    const detail: WorkspaceDetail = {
+      name: "Thread",
+      params: { environmentId: String(targetEnvId), threadId: String(targetThreadId) },
+    };
+    startOpeningDetail(detail);
+    rootNavigationRef.dispatch(selectWorkspaceDetail(detail));
   };
 
   const canNavigate = Boolean(targetEnvId && targetThreadId);
