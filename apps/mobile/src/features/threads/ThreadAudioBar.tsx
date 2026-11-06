@@ -236,14 +236,14 @@ export function ThreadAudioBar(props?: {
       className="absolute left-3 right-3 z-50 items-center"
       style={{ top }}
     >
-      <View className="w-full max-w-md flex-row items-center justify-between rounded-full border border-border bg-card px-3 py-2 shadow-xl shadow-black/25">
-        {/* Left status / speaker indicator (tappable to jump to thread) */}
+      <View className="w-full max-w-md gap-1.5 rounded-3xl border border-border bg-card px-3 pb-2.5 pt-2 shadow-xl shadow-black/25">
+        {/* Project and time on top, controls below: one row is too narrow on small phones. */}
         <Pressable
           disabled={!canNavigate}
           onPress={handleNavigateToThread}
           accessibilityRole={canNavigate ? "button" : undefined}
           accessibilityLabel={canNavigate ? "Zur aktiven Konversation wechseln" : undefined}
-          className="min-w-0 flex-1 flex-row items-center gap-2 pl-1 pr-3 active:opacity-70"
+          className="flex-row items-center gap-2 px-1 active:opacity-70"
         >
           <View className="size-6 items-center justify-center rounded-full bg-primary/15">
             <SymbolView
@@ -253,14 +253,13 @@ export function ThreadAudioBar(props?: {
               type="monochrome"
             />
           </View>
-          <Text className="shrink text-xs font-t3-bold text-foreground" numberOfLines={1}>
+          <Text className="min-w-0 flex-1 text-xs font-t3-bold text-foreground" numberOfLines={1}>
             {barText}
           </Text>
           {isPlaying || isPaused ? <ReadAloudProgressLabel /> : null}
         </Pressable>
 
-        {/* Right audio controls: ALWAYS visible on the bar */}
-        <View className="flex-row items-center gap-3">
+        <View className="flex-row items-center justify-between">
           {summaryToggle.available ? (
             <Pressable
               accessibilityRole="switch"
@@ -340,28 +339,6 @@ export function ThreadAudioBar(props?: {
             )}
           </Pressable>
 
-          {/* Stop this answer but keep the session: the next reply plays as it arrives. */}
-          {isPlaying || isPaused || isLoading ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Antwort stoppen"
-              accessibilityHint="Beendet diese Antwort und wartet auf die nächste"
-              hitSlop={6}
-              onPress={() => {
-                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                stopAnswer();
-              }}
-              className="size-9 items-center justify-center rounded-full active:bg-foreground/10"
-            >
-              <SymbolView
-                name="stop.fill"
-                size={13}
-                tintColorClassName="accent-foreground"
-                type="monochrome"
-              />
-            </Pressable>
-          ) : null}
-
           {/* +10 seconds */}
           <Pressable
             accessibilityRole="button"
@@ -384,6 +361,28 @@ export function ThreadAudioBar(props?: {
               type="monochrome"
             />
           </Pressable>
+
+          {/* Stop this answer but keep the session: the next reply plays as it arrives. */}
+          {isPlaying || isPaused || isLoading ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Antwort stoppen"
+              accessibilityHint="Beendet diese Antwort und wartet auf die nächste"
+              hitSlop={6}
+              onPress={() => {
+                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                stopAnswer();
+              }}
+              className="size-9 items-center justify-center rounded-full active:bg-foreground/10"
+            >
+              <SymbolView
+                name="stop.fill"
+                size={13}
+                tintColorClassName="accent-foreground"
+                type="monochrome"
+              />
+            </Pressable>
+          ) : null}
 
           {/* Close / Deactivate button (X) */}
           <Pressable
