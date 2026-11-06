@@ -78,7 +78,7 @@ import {
   type ThreadListV2ListItem,
 } from "../threads/threadListV2";
 import { useThreadListV2ShelfPreferences } from "../threads/use-thread-list-v2-shelf-preferences";
-import { useIsAudioBarVisible } from "../threads/useReadAloud";
+import { AUDIO_BAR_CLEARANCE, useIsAudioBarVisible } from "../threads/useReadAloud";
 import type { HomeListFilterMenuEnvironment } from "./home-list-filter-menu";
 import {
   buildHomeProjectScopes,
@@ -686,9 +686,9 @@ export function HomeScreen(props: HomeScreenProps) {
                 Platform.OS === "ios" ? iosBottomClearance : Math.max(insets.bottom, 24),
               // The floating audio bar sits above the content while read-aloud is on.
               paddingTop: NATIVE_LIQUID_GLASS_SUPPORTED
-                ? insets.top + (isAudioBarVisible ? 128 : 72)
+                ? insets.top + 72 + (isAudioBarVisible ? AUDIO_BAR_CLEARANCE : 0)
                 : isAudioBarVisible
-                  ? 56
+                  ? AUDIO_BAR_CLEARANCE
                   : 0,
               paddingLeft: 32 + (contentSideInsets?.left ?? 0),
               paddingRight: 32 + (contentSideInsets?.right ?? 0),
@@ -732,10 +732,10 @@ export function HomeScreen(props: HomeScreenProps) {
   const listHeader =
     Platform.OS === "ios" ? (
       isAudioBarVisible ? (
-        <View style={{ height: 56 }} />
+        <View style={{ height: AUDIO_BAR_CLEARANCE }} />
       ) : undefined
     ) : isAudioBarVisible ? (
-      <View style={{ height: 72 }} />
+      <View style={{ height: AUDIO_BAR_CLEARANCE + 16 }} />
     ) : (
       <HomeTopContentSpacer />
     );

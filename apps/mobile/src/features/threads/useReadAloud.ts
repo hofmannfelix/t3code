@@ -505,6 +505,9 @@ export const stopGlobalAudioSession = (options?: { readonly persist?: boolean })
   syncAudioLiveActivity(IDLE);
 };
 
+/** Space the floating two-row audio bar takes below the navigation bar, including its gap. */
+export const AUDIO_BAR_CLEARANCE = 96;
+
 export const useIsAudioBarVisible = (): boolean => {
   const isSessionActive = useIsAudioSessionActive();
   const current = useSyncExternalStore(
