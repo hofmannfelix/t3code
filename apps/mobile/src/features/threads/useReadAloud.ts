@@ -164,7 +164,9 @@ if (
             playlist.play();
             setSpeech({ ...currentSpeech, phase: "playing" });
           } catch {}
-        } else if (currentSpeech.phase === "paused") {
+        } else if (startQueuedAnswerOnResume()) {
+          return;
+        } else if (currentSpeech.phase === "paused" && currentAnswerBlock !== null) {
           setSpeech({ ...currentSpeech, phase: "playing" });
         } else if (isAudioSessionActive) {
           if (T3NativeControls?.resumeWaitingAudio) {
@@ -196,7 +198,7 @@ if (
             } catch {}
           }
           setSpeech({ ...currentSpeech, phase: "paused" });
-        } else if (currentSpeech.phase === "paused") {
+        } else if (currentSpeech.phase === "paused" && currentAnswerBlock !== null) {
           isUserPausedState = false;
           if (playlist) {
             try {
@@ -212,6 +214,7 @@ if (
         } else if (isAudioSessionActive) {
           if (isUserPausedState) {
             isUserPausedState = false;
+            if (startQueuedAnswerOnResume()) return;
             if (T3NativeControls?.resumeWaitingAudio) {
               try {
                 void T3NativeControls.resumeWaitingAudio({
@@ -1160,7 +1163,7 @@ export const resumeAudioAfterVoiceRecording = async () => {
   }
 
   // If no speech was playing (or speech couldn't resume), but answer blocks were queued:
-  if (currentAnswerBlock === null && answerBlockQueue.length > 0) {
+  if (currentAnswerBlock === null && answerBlockQueue.length > 0 && !isUserPausedState) {
     const nextBlock = answerBlockQueue.shift()!;
     log("resumeAudioAfterVoiceRecording: starting queued answer block", nextBlock.key);
     startAnswerBlock(nextBlock);
@@ -1184,12 +1187,40 @@ export const resumeAudioAfterVoiceRecording = async () => {
 let chunkedPlayback = true;
 /** Mirrors the read-aloud preferences for the module-level queue. */
 let speechLanguageHint: SpeechLanguageHint | undefined;
-let summaryThreadKeys: ReadonlySet<string> = new Set();
+let summaryThreadKeys: ReadonlyArray<string> = [];
 /** How long a short update may take before the full reply is read instead. */
 const SUMMARY_TIMEOUT_MS = 15_000;
 
 export const readAloudSummaryKey = (environmentId: string, threadId: string) =>
   `${environmentId}/${threadId}`;
+
+/** Stored with the per-thread keys: short updates for every thread without its own choice. */
+const SUMMARY_ALL_THREADS = "*";
+const SUMMARY_OFF_PREFIX = "!";
+
+/** A thread's own choice wins over the all-threads default, in either direction. */
+export const isReadAloudSummaryOn = (keys: ReadonlyArray<string>, key: string | null): boolean => {
+  if (key === null) return keys.includes(SUMMARY_ALL_THREADS);
+  if (keys.includes(key)) return true;
+  if (keys.includes(SUMMARY_OFF_PREFIX + key)) return false;
+  return keys.includes(SUMMARY_ALL_THREADS);
+};
+
+/** Flips the all-threads default when `key` is null, otherwise that thread's own choice. */
+export const toggleReadAloudSummary = (
+  keys: ReadonlyArray<string>,
+  key: string | null,
+): ReadonlyArray<string> => {
+  if (key === null) {
+    return keys.includes(SUMMARY_ALL_THREADS)
+      ? keys.filter((existing) => existing !== SUMMARY_ALL_THREADS)
+      : [...keys, SUMMARY_ALL_THREADS];
+  }
+  const next = !isReadAloudSummaryOn(keys, key);
+  const rest = keys.filter((existing) => existing !== key && existing !== SUMMARY_OFF_PREFIX + key);
+  if (next === keys.includes(SUMMARY_ALL_THREADS)) return rest;
+  return [...rest, next ? key : SUMMARY_OFF_PREFIX + key];
+};
 
 let playThroughCurrentDeps: ((item: ReadItem) => void) | null = null;
 let activeStartAnswerBlock: ((item: ReadItem, isCurrent: () => boolean) => void) | null = null;
@@ -1276,6 +1307,15 @@ const finishCurrentAnswerBlock = () => {
   }
 };
 
+/** Starts the oldest reply that arrived while the user had paused; false when none waits. */
+const startQueuedAnswerOnResume = (): boolean => {
+  if (currentAnswerBlock !== null || isVoiceRecordingActive) return false;
+  const next = answerBlockQueue.shift();
+  if (!next) return false;
+  startAnswerBlock(next);
+  return true;
+};
+
 const enqueueAnswerBlock = (
   item: {
     readonly key: string;
@@ -1351,7 +1391,7 @@ const enqueueAnswerBlock = (
     !item.clipUri &&
     resolvedEnvId !== null &&
     item.threadId !== undefined &&
-    summaryThreadKeys.has(readAloudSummaryKey(resolvedEnvId, item.threadId));
+    isReadAloudSummaryOn(summaryThreadKeys, readAloudSummaryKey(resolvedEnvId, item.threadId));
   const blockItem: ReadItem = {
     key: item.key,
     text: textToSpeak,
@@ -1382,10 +1422,9 @@ const enqueueAnswerBlock = (
     return;
   }
 
-  // Only a playing answer may hold replies back. A paused waiting loop is not
-  // one: queueing behind it would leave the reply stranded until a newer one
-  // starts, and then it would play after that newer reply.
-  if (currentAnswerBlock === null && !isVoiceRecordingActive) {
+  // A playing answer, a recording, or the user's own pause holds replies back; resuming
+  // starts them in arrival order (see startQueuedAnswerOnResume).
+  if (currentAnswerBlock === null && !isVoiceRecordingActive && !isUserPausedState) {
     startAnswerBlock(blockItem);
   } else {
     answerBlockQueue.push(blockItem);
@@ -1486,7 +1525,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- the module-level queue reads the language and summary threads outside React
   useEffect(() => {
     speechLanguageHint = readAloudLanguage;
-    summaryThreadKeys = new Set(readAloudSummaryThreads ?? []);
+    summaryThreadKeys = readAloudSummaryThreads ?? [];
   }, [readAloudLanguage, readAloudSummaryThreads]);
 
   const deviceTtsConfig = useMemo(
@@ -2135,6 +2174,7 @@ export function useReadAloud(environmentId?: EnvironmentId | null) {
         log("resume: playlist.play() failed", e);
       }
     }
+    if (startQueuedAnswerOnResume()) return;
     if (isAudioSessionActive) {
       if (T3NativeControls?.resumeWaitingAudio) {
         try {
@@ -2366,21 +2406,14 @@ export function useReadAloudSummaryToggle(
   const updatePreferences = useAtomSet(updateMobilePreferencesAtom);
   const key = environmentId && threadId ? readAloudSummaryKey(environmentId, threadId) : null;
   const enabled =
-    key !== null &&
     AsyncResult.isSuccess(preferencesResult) &&
-    (preferencesResult.value.readAloudSummaryThreads ?? []).includes(key);
+    isReadAloudSummaryOn(preferencesResult.value.readAloudSummaryThreads ?? [], key);
   const toggle = () => {
-    if (key === null) return;
     updatePreferences({
-      transform: (current) => {
-        const keys = current.readAloudSummaryThreads ?? [];
-        return {
-          readAloudSummaryThreads: keys.includes(key)
-            ? keys.filter((existing) => existing !== key)
-            : [...keys, key],
-        };
-      },
+      transform: (current) => ({
+        readAloudSummaryThreads: toggleReadAloudSummary(current.readAloudSummaryThreads ?? [], key),
+      }),
     });
   };
-  return { available: key !== null, enabled, toggle };
+  return { allThreads: key === null, enabled, toggle };
 }

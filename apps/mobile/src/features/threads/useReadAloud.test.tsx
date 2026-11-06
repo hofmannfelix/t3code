@@ -256,6 +256,8 @@ import {
   stopAllSpeech,
   useReadAloud,
   useReadAloudAutoAnnounce,
+  isReadAloudSummaryOn,
+  toggleReadAloudSummary,
 } from "./useReadAloud";
 
 vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -588,6 +590,23 @@ describe("useReadAloud", () => {
     act(() => {
       view.stop()();
     });
+  });
+
+  it("lets a thread's own short-update choice override the all-threads default", () => {
+    const a = "env-1/thread-a";
+    let keys = toggleReadAloudSummary([], null);
+    expect(isReadAloudSummaryOn(keys, null)).toBe(true);
+    expect(isReadAloudSummaryOn(keys, a)).toBe(true);
+
+    keys = toggleReadAloudSummary(keys, a);
+    expect(isReadAloudSummaryOn(keys, a)).toBe(false);
+    expect(isReadAloudSummaryOn(keys, "env-1/thread-b")).toBe(true);
+
+    keys = toggleReadAloudSummary(keys, null);
+    expect(isReadAloudSummaryOn(keys, a)).toBe(false);
+    keys = toggleReadAloudSummary(keys, a);
+    expect(isReadAloudSummaryOn(keys, a)).toBe(true);
+    expect(keys).toEqual([a]);
   });
 
   it("reads the full reply when the short update fails", async () => {
@@ -1494,7 +1513,7 @@ describe("useReadAloudAutoAnnounce", () => {
     expect(isGlobalAudioSessionActive()).toBe(false);
   });
 
-  it("starts a reply right away while no answer plays, even with the waiting audio paused", async () => {
+  it("holds replies while the user paused the waiting audio and plays them in order on resume", async () => {
     await act(async () => {
       await startGlobalAudioSession({ threadId: "thread-waiting" });
     });
@@ -1506,6 +1525,13 @@ describe("useReadAloudAutoAnnounce", () => {
 
     await act(async () => {
       view.enqueue()({ key: "msg-old", text: "Old reply.", threadId: "thread-waiting" });
+    });
+    await flush();
+    expect(harness.players).toHaveLength(0);
+    expect(view.speech()).toMatchObject({ key: null, phase: "paused", queued: 1 });
+
+    await act(async () => {
+      view.resume()();
     });
     await flush();
     expect(view.speech()).toMatchObject({ key: "msg-old", queued: 0 });

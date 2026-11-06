@@ -192,6 +192,7 @@ export function ThreadAudioBar(props?: {
   const isPlaying = phase === "playing";
   const isPaused = phase === "paused";
   const isLoading = phase === "loading";
+  const hasAnswer = isPlaying || isPaused || isLoading;
   const isWaitingWithMusic = isSessionActive && !isPaused && !isPlaying && !isLoading;
 
   const handleTogglePlayPause = () => {
@@ -260,34 +261,40 @@ export function ThreadAudioBar(props?: {
         </Pressable>
 
         <View className="flex-row items-center justify-between">
-          {summaryToggle.available ? (
-            <Pressable
-              accessibilityRole="switch"
-              accessibilityState={{ checked: summaryToggle.enabled }}
-              accessibilityLabel="Kurze Updates für diesen Thread"
-              accessibilityHint="Liest neue Antworten dieses Threads als kurze Zusammenfassung vor"
-              hitSlop={6}
-              onPress={() => {
-                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                summaryToggle.toggle();
-              }}
+          <Pressable
+            accessibilityRole="switch"
+            accessibilityState={{ checked: summaryToggle.enabled }}
+            accessibilityLabel={
+              summaryToggle.allThreads
+                ? "Kurze Updates für alle Threads"
+                : "Kurze Updates für diesen Thread"
+            }
+            accessibilityHint={
+              summaryToggle.allThreads
+                ? "Liest neue Antworten aller Threads ohne eigene Wahl als kurze Zusammenfassung vor"
+                : "Liest neue Antworten dieses Threads als kurze Zusammenfassung vor"
+            }
+            hitSlop={6}
+            onPress={() => {
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              summaryToggle.toggle();
+            }}
+            className={
+              summaryToggle.enabled
+                ? "h-7 items-center justify-center rounded-full bg-primary px-2.5 active:opacity-75"
+                : "h-7 items-center justify-center rounded-full bg-foreground/10 px-2.5 active:opacity-75"
+            }
+          >
+            <Text
               className={
                 summaryToggle.enabled
-                  ? "h-7 items-center justify-center rounded-full bg-primary px-2.5 active:opacity-75"
-                  : "h-7 items-center justify-center rounded-full bg-foreground/10 px-2.5 active:opacity-75"
+                  ? "text-xs font-t3-bold text-primary-foreground"
+                  : "text-xs font-t3-bold text-foreground-muted"
               }
             >
-              <Text
-                className={
-                  summaryToggle.enabled
-                    ? "text-xs font-t3-bold text-primary-foreground"
-                    : "text-xs font-t3-bold text-foreground-muted"
-                }
-              >
-                Kurz
-              </Text>
-            </Pressable>
-          ) : null}
+              Kurz
+            </Text>
+          </Pressable>
           {/* -10 seconds */}
           <Pressable
             accessibilityRole="button"
@@ -363,26 +370,29 @@ export function ThreadAudioBar(props?: {
           </Pressable>
 
           {/* Stop this answer but keep the session: the next reply plays as it arrives. */}
-          {isPlaying || isPaused || isLoading ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Antwort stoppen"
-              accessibilityHint="Beendet diese Antwort und wartet auf die nächste"
-              hitSlop={6}
-              onPress={() => {
-                void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                stopAnswer();
-              }}
-              className="size-9 items-center justify-center rounded-full active:bg-foreground/10"
-            >
-              <SymbolView
-                name="stop.fill"
-                size={13}
-                tintColorClassName="accent-foreground"
-                type="monochrome"
-              />
-            </Pressable>
-          ) : null}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Antwort stoppen"
+            accessibilityHint="Beendet diese Antwort und wartet auf die nächste"
+            hitSlop={6}
+            disabled={!hasAnswer}
+            onPress={() => {
+              void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              stopAnswer();
+            }}
+            className={
+              hasAnswer
+                ? "size-9 items-center justify-center rounded-full active:bg-foreground/10"
+                : "size-9 items-center justify-center rounded-full opacity-40"
+            }
+          >
+            <SymbolView
+              name="stop.fill"
+              size={13}
+              tintColorClassName="accent-foreground"
+              type="monochrome"
+            />
+          </Pressable>
 
           {/* Close / Deactivate button (X) */}
           <Pressable

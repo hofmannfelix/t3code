@@ -26,11 +26,16 @@ The stop button in the audio bar ends the answer that is playing or paused, but 
 audio on: the next queued answer starts, or the bar goes back to waiting and plays the
 next reply as soon as it arrives. The close button ends audio altogether.
 
+While you have paused, new replies wait in the queue (the bar shows how many) and
+start in order when you press play.
+
 ## Short updates on mobile
 
-In the mobile app, the audio bar shows a **Kurz** switch while it plays or waits for
-a thread. Turn it on, and that thread's automatic replies are read as a one- or
-two-sentence spoken summary. Tapping the speaker on a message still reads it in
+In the mobile app, the audio bar shows a **Kurz** switch. While it plays or waits
+for a thread, the switch applies to that thread: its automatic replies are read as
+a one- or two-sentence spoken summary. Without a thread, for example while waiting
+on the thread list, it sets the default for every thread that has no choice of its
+own. Tapping the speaker on a message still reads it in
 full. The summary uses the read-aloud provider's key: Gemini on the device, or the
 server's provider (Gemini or OpenAI). If the summary cannot be made in time, the
 full reply is read instead.
